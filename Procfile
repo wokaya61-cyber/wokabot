@@ -1,0 +1,1 @@
+worker: python amazon_price_bot.py

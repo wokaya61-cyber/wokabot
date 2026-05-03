@@ -86,6 +86,7 @@ def create_driver():
     options.add_argument("--headless=new")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
+
     options.binary_location = "/usr/bin/google-chrome"
 
     user_agents = [
@@ -103,21 +104,17 @@ def create_driver():
         f"user-agent={ua}"
     )
 
-    
-	from selenium.webdriver.chrome.service import Service
-	from webdriver_manager.chrome import ChromeDriverManager
+    from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
 
-	driver = webdriver.Chrome(
-    	service=Service(
-        ChromeDriverManager().install()
-    	),
-    	options=options
-	)
-
+    driver = webdriver.Chrome(
+        service=Service(
+            ChromeDriverManager().install()
+        ),
+        options=options
     )
 
     return driver
-
 
 driver = create_driver()
 

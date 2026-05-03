@@ -4,6 +4,12 @@
 # AUTO CLEAN AMAZON LINKS
 # =========================================
 
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+
 import json
 import os
 import re
@@ -119,69 +125,35 @@ def get_product_info(url):
 
     try:
 
-        with sync_playwright() as p:
+        options = Options()
 
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage"
-                ]
-            )
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
 
-            context = browser.new_context(
+        options.add_argument(
+            "user-agent=Mozilla/5.0"
+        )
 
-                locale="tr-TR",
+        driver = webdriver.Chrome(
+            service=Service(
+                ChromeDriverManager().install()
+            ),
+            options=options
+        )
 
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/125.0.0.0 Safari/537.36"
-                ),
+        driver.get(url)
 
-                viewport={
-                    "width": 1920,
-                    "height": 1080
-                }
-            )
+        time.sleep(8)
 
-            page = context.new_page()
+        html = driver.page_source
 
-            page.goto(
-                url,
-                wait_until="networkidle",
-                timeout=90000
-            )
-
-            page.wait_for_timeout(12000)
-
-            try:
-                page.wait_for_selector(
-                    "#productTitle",
-                    timeout=15000
-                )
-            except:
-                pass
-
-            try:
-                page.wait_for_selector(
-                    ".a-price",
-                    timeout=15000
-                )
-            except:
-                pass
-
-            html = page.content()
-
-            browser.close()
+        driver.quit()
 
         soup = BeautifulSoup(
             html,
             "html.parser"
         )
-
-        # TITLE
 
         title = ""
 
@@ -191,38 +163,6 @@ def get_product_info(url):
 
         if title_el:
             title = title_el.text.strip()
-
-        # PAGE TEXT
-
-        page_text = soup.get_text(
-            " ",
-            strip=True
-        ).lower()
-
-        # SELLER CHECK
-
-        seller_ok = True
-
-        seller_patterns = [
-
-            "amazon.com.tr tarafından satılmaktadır",
-
-            "satıcı amazon.com.tr",
-
-            "gönderen amazon.com.tr",
-
-            "ships from amazon.com.tr",
-
-            "sold by amazon.com.tr"
-        ]
-
-        for ptn in seller_patterns:
-
-            if ptn in page_text:
-                seller_ok = True
-                break
-
-        # PRICE
 
         price = None
 
@@ -250,42 +190,8 @@ def get_product_info(url):
                 if price:
                     break
 
-        # COUPON
-
-        coupon_exists = False
-
-        coupon_text = ""
-
-        texts = soup.find_all(string=True)
-
-        for t in texts:
-
-            txt = t.strip()
-
-            if any(
-                x in txt.lower()
-                for x in [
-                    "kupon",
-                    "indirim",
-                    "sepette"
-                ]
-            ):
-
-                coupon_exists = True
-                coupon_text = txt
-                break
-
-        # STOCK
-
-        in_stock = True
-
-        if (
-            "stokta yok" in page_text
-            or
-            "currently unavailable" in page_text
-        ):
-
-            in_stock = False
+        if not title:
+            return None
 
         return {
 
@@ -293,13 +199,13 @@ def get_product_info(url):
 
             "price": price,
 
-            "seller_ok": seller_ok,
+            "seller_ok": True,
 
-            "coupon_exists": coupon_exists,
+            "coupon_exists": False,
 
-            "coupon_text": coupon_text,
+            "coupon_text": "",
 
-            "in_stock": in_stock
+            "in_stock": True
         }
 
     except Exception as e:
@@ -307,7 +213,6 @@ def get_product_info(url):
         print("SCRAPER ERROR:", e)
 
         return None
-
 
 
 # =========================================

@@ -1,1 +1,1 @@
-worker: bash -c "playwright install chromium && python amazon_price_bot.py"
+worker: python amazon_price_bot.py

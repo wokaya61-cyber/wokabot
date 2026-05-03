@@ -155,27 +155,26 @@ def get_product_info(url):
             )
 
             page.wait_for_timeout(12000)
-            
+
             try:
-
                 page.wait_for_selector(
-                "#productTitle",
-                timeout=15000
-            )  
-        except:
-            pass
+                    "#productTitle",
+                    timeout=15000
+                )
+            except:
+                pass
 
-        try:
-            page.wait_for_selector(
-                ".a-price",
-                timeout=15000
-            )
-        except:
-            pass  
+            try:
+                page.wait_for_selector(
+                    ".a-price",
+                    timeout=15000
+                )
+            except:
+                pass
 
-        html = page.content()
+            html = page.content()
 
-        browser.close()
+            browser.close()
 
         soup = BeautifulSoup(
             html,
@@ -227,18 +226,18 @@ def get_product_info(url):
 
         price = None
 
-        price_selectors = [
+        selectors = [
 
             ".a-price .a-offscreen",
 
-            ".a-price-whole",
-
             "#priceblock_ourprice",
 
-            "#priceblock_dealprice"
+            "#priceblock_dealprice",
+
+            ".a-price-whole"
         ]
 
-        for selector in price_selectors:
+        for selector in selectors:
 
             el = soup.select_one(selector)
 
@@ -308,6 +307,7 @@ def get_product_info(url):
         print("SCRAPER ERROR:", e)
 
         return None
+
 
 
 # =========================================

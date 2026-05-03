@@ -13,6 +13,11 @@ import os
 import re
 import time
 import threading
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+TOKEN = os.getenv("BOT_TOKEN")
 
 from bs4 import BeautifulSoup
 

@@ -28,7 +28,7 @@ from telegram import (
 )
 
 from telegram.ext import (
-    Application,
+    ApplicationBuilder,
     CommandHandler,
     ContextTypes
 )
@@ -649,7 +649,7 @@ def background_checker(app):
 
 def main():
 
-    app = Application.builder().token(
+    app = ApplicationBuilder().token(
         BOT_TOKEN
     ).build()
 

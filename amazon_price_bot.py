@@ -7,8 +7,8 @@
 import undetected_chromedriver as uc
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+
+
 
 import json
 import os
@@ -134,12 +134,12 @@ def get_product_info(url):
             "user-agent=Mozilla/5.0"
         )
 
-                driver = uc.Chrome(
-        options=options,
-        headless=True,
-        use_subprocess=True
+        driver = uc.Chrome(
+            options=options,
+            headless=True,
+            use_subprocess=True
         )
-        
+
 
         driver.get(url)
 

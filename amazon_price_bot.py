@@ -30,7 +30,6 @@ from telegram.ext import (
     ContextTypes
 )
 
-from playwright.sync_api import sync_playwright
 
 # =========================================
 # TOKEN

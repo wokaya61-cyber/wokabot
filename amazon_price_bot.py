@@ -1,6 +1,7 @@
 # =========================================
 # AMAZON TELEGRAM PRICE BOT
-# PLAYWRIGHT + RAILWAY STABLE VERSION
+# PROFESSIONAL VERSION
+# AUTO CLEAN AMAZON LINKS
 # =========================================
 
 import json
@@ -26,7 +27,7 @@ from telegram.ext import (
 from playwright.sync_api import sync_playwright
 
 # =========================================
-# TELEGRAM TOKEN
+# TOKEN
 # =========================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -35,12 +36,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 # SETTINGS
 # =========================================
 
-CHECK_INTERVAL = 30
+CHECK_INTERVAL = 10
 
 DATA_FILE = "products.json"
 
 # =========================================
-# LOAD DATA
+# LOAD / SAVE
 # =========================================
 
 def load_data():
@@ -62,6 +63,34 @@ def save_data(data):
         )
 
 products = load_data()
+
+# =========================================
+# AMAZON LINK CLEANER
+# =========================================
+
+def clean_amazon_url(url):
+
+    patterns = [
+
+        r"/dp/([A-Z0-9]{10})",
+
+        r"/gp/product/([A-Z0-9]{10})"
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            url
+        )
+
+        if match:
+
+            asin = match.group(1)
+
+            return f"https://www.amazon.com.tr/dp/{asin}"
+
+    return url.split("?")[0]
 
 # =========================================
 # PRICE PARSER
@@ -132,7 +161,7 @@ def get_product_info(url):
             strip=True
         ).lower()
 
-        # SELLER CHECK
+        # AMAZON SELLER
 
         seller_ok = False
 
@@ -142,7 +171,11 @@ def get_product_info(url):
 
             "satıcı amazon.com.tr",
 
-            "gönderen amazon.com.tr"
+            "gönderen amazon.com.tr",
+
+            "ships from amazon.com.tr",
+
+            "sold by amazon.com.tr"
         ]
 
         for ptn in seller_patterns:
@@ -173,6 +206,19 @@ def get_product_info(url):
             price = parse_price(
                 price_text
             )
+
+        # FALLBACK PRICE
+
+        if not price:
+
+            prices = re.findall(
+                r'[\d\.]+,\d+\s?TL',
+                page_text,
+                re.IGNORECASE
+            )
+
+            if prices:
+                price = parse_price(prices[0])
 
         # COUPON
 
@@ -273,7 +319,7 @@ Komutlar:
 
 Örnek:
 
-/add https://www.amazon.com.tr/dp/XXXX 15
+/add https://www.amazon.com.tr/dp/B0BJQP23Y8 15
 """
 
     await update.message.reply_text(text)
@@ -297,9 +343,11 @@ async def add_product(
 
         return
 
-    url = context.args[0]
+    raw_url = context.args[0]
 
-    url = url.split("?")[0]
+    url = clean_amazon_url(
+        raw_url
+    )
 
     try:
 
@@ -320,7 +368,7 @@ async def add_product(
     if not info:
 
         await update.message.reply_text(
-            "Ürün okunamadı."
+            "❌ Ürün okunamadı."
         )
 
         return
@@ -382,6 +430,8 @@ async def add_product(
 💰 {info['price']} TL
 
 🎯 %{drop_percent} düşüş bildirimi aktif
+
+🔗 {url}
 """
     )
 
@@ -404,7 +454,9 @@ async def remove_product(
 
         return
 
-    url = context.args[0]
+    url = clean_amazon_url(
+        context.args[0]
+    )
 
     if chat_id not in products:
 
@@ -494,7 +546,7 @@ async def check_command(
     )
 
 # =========================================
-# PRICE CALCULATOR
+# PRICE DROP
 # =========================================
 
 def calculate_drop(
@@ -509,7 +561,7 @@ def calculate_drop(
     ) * 100
 
 # =========================================
-# TELEGRAM NOTIFY
+# TELEGRAM SEND
 # =========================================
 
 async def notify(

@@ -123,6 +123,7 @@ def get_product_info(url):
     try:
 
         options = Options()
+        options.binary_location = "/usr/bin/chromium"
 
         options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
@@ -134,6 +135,7 @@ def get_product_info(url):
         )
 
         driver = webdriver.Chrome(
+            service=Service("/usr/bin/chromedriver"),
             options=options,            
         )
 

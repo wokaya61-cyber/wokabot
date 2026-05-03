@@ -136,7 +136,6 @@ def get_product_info(url):
 
         driver = uc.Chrome(
             options=options,
-            headless=True,
             use_subprocess=True
         )
 

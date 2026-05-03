@@ -1,14 +1,6 @@
 # =========================================
 # AMAZON TELEGRAM PRICE BOT
-# HATASIZ STABİL SÜRÜM
-# =========================================
-
-# KURULUM:
-#
-# pip install python-telegram-bot==20.3
-# pip install selenium==4.21.0
-# pip install beautifulsoup4==4.12.3
-#
+# PLAYWRIGHT + RAILWAY STABLE VERSION
 # =========================================
 
 import json
@@ -16,7 +8,6 @@ import os
 import re
 import time
 import threading
-import random
 
 from bs4 import BeautifulSoup
 
@@ -32,25 +23,24 @@ from telegram.ext import (
     ContextTypes
 )
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
+from playwright.sync_api import sync_playwright
 
 # =========================================
 # TELEGRAM TOKEN
 # =========================================
 
-BOT_TOKEN = "8795704026:AAEjTlhdbWwPmdYWobzCmruRBBToe0gWOuQ"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # =========================================
-# AYARLAR
+# SETTINGS
 # =========================================
 
-CHECK_INTERVAL = 10
+CHECK_INTERVAL = 30
 
 DATA_FILE = "products.json"
 
 # =========================================
-# DATA LOAD
+# LOAD DATA
 # =========================================
 
 def load_data():
@@ -60,7 +50,6 @@ def load_data():
 
     with open(DATA_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
-
 
 def save_data(data):
 
@@ -72,51 +61,7 @@ def save_data(data):
             ensure_ascii=False
         )
 
-
 products = load_data()
-
-# =========================================
-# CHROME DRIVER
-# =========================================
-
-def create_driver():
-
-    options = Options()
-
-    options.add_argument("--headless=new")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-
-    options.binary_location = "/usr/bin/google-chrome"
-
-    user_agents = [
-
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-
-        "Mozilla/5.0 (X11; Linux x86_64)",
-
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
-    ]
-
-    ua = random.choice(user_agents)
-
-    options.add_argument(
-        f"user-agent={ua}"
-    )
-
-    from selenium.webdriver.chrome.service import Service
-    from webdriver_manager.chrome import ChromeDriverManager
-
-    driver = webdriver.Chrome(
-        service=Service(
-            ChromeDriverManager().install()
-        ),
-        options=options
-    )
-
-    return driver
-
-driver = create_driver()
 
 # =========================================
 # PRICE PARSER
@@ -138,19 +83,34 @@ def parse_price(text):
     return None
 
 # =========================================
-# AMAZON SCRAPER
+# PRODUCT SCRAPER
 # =========================================
 
 def get_product_info(url):
 
     try:
 
-        driver.get(url)
+        with sync_playwright() as p:
 
-        time.sleep(4)
+            browser = p.chromium.launch(
+                headless=True
+            )
+
+            page = browser.new_page()
+
+            page.goto(
+                url,
+                timeout=60000
+            )
+
+            page.wait_for_timeout(5000)
+
+            html = page.content()
+
+            browser.close()
 
         soup = BeautifulSoup(
-            driver.page_source,
+            html,
             "html.parser"
         )
 
@@ -165,14 +125,16 @@ def get_product_info(url):
         if title_el:
             title = title_el.text.strip()
 
-        # SELLER
-
-        seller_ok = False
+        # PAGE TEXT
 
         page_text = soup.get_text(
             " ",
             strip=True
         ).lower()
+
+        # SELLER CHECK
+
+        seller_ok = False
 
         seller_patterns = [
 
@@ -183,9 +145,9 @@ def get_product_info(url):
             "gönderen amazon.com.tr"
         ]
 
-        for p in seller_patterns:
+        for ptn in seller_patterns:
 
-            if p in page_text:
+            if ptn in page_text:
                 seller_ok = True
                 break
 
@@ -231,11 +193,9 @@ def get_product_info(url):
             r"₺\d+ kupon"
         ]
 
-        all_texts = soup.find_all(
-            string=True
-        )
+        texts = soup.find_all(string=True)
 
-        for t in all_texts:
+        for t in texts:
 
             txt = t.strip()
 
@@ -313,7 +273,7 @@ Komutlar:
 
 Örnek:
 
-/add https://amazon.com.tr/... 15
+/add https://www.amazon.com.tr/dp/XXXX 15
 """
 
     await update.message.reply_text(text)
@@ -383,8 +343,6 @@ async def add_product(
 
     if chat_id not in products:
         products[chat_id] = []
-
-    # DUPLICATE
 
     for p in products[chat_id]:
 
@@ -582,7 +540,7 @@ async def notify(
     )
 
 # =========================================
-# PRICE CHECKER
+# BACKGROUND CHECKER
 # =========================================
 
 def background_checker(app):
@@ -593,10 +551,6 @@ def background_checker(app):
 
     asyncio.set_event_loop(loop)
 
-    global driver
-
-    request_count = 0
-
     while True:
 
         try:
@@ -604,18 +558,6 @@ def background_checker(app):
             for chat_id in list(products.keys()):
 
                 for product in products[chat_id]:
-
-                    request_count += 1
-
-                    # DRIVER RESET
-
-                    if request_count >= 50:
-
-                        driver.quit()
-
-                        driver = create_driver()
-
-                        request_count = 0
 
                     info = get_product_info(
                         product["url"]
@@ -800,3 +742,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

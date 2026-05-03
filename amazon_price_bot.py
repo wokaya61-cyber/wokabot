@@ -124,7 +124,7 @@ def get_product_info(url):
 
     try:
 
-        options = Options()
+        options = uc.ChromeOptions()
 
         options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")

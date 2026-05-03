@@ -122,7 +122,7 @@ def get_product_info(url):
 
     try:
 
-        options = uc.ChromeOptions()
+        options = Options()
 
         options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
@@ -132,9 +132,8 @@ def get_product_info(url):
         "user-agent=Mozilla/5.0 ..."
         )
 
-        driver = uc.Chrome(
-            options=options,
-            use_subprocess=True
+        driver = webdriver.Chrome(
+            options=options,            
         )
 
         driver.get(url)

@@ -122,17 +122,39 @@ def get_product_info(url):
         with sync_playwright() as p:
 
             browser = p.chromium.launch(
-                headless=True
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage"
+                ]
             )
 
-            page = browser.new_page()
+            context = browser.new_context(
+
+                locale="tr-TR",
+
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/125.0.0.0 Safari/537.36"
+                ),
+
+                viewport={
+                    "width": 1920,
+                    "height": 1080
+                }
+            )
+
+            page = context.new_page()
 
             page.goto(
                 url,
-                timeout=60000
+                wait_until="domcontentloaded",
+                timeout=90000
             )
 
-            page.wait_for_timeout(5000)
+            page.wait_for_timeout(8000)
 
             html = page.content()
 
@@ -161,7 +183,7 @@ def get_product_info(url):
             strip=True
         ).lower()
 
-        # AMAZON SELLER
+        # SELLER CHECK
 
         seller_ok = False
 
@@ -188,37 +210,29 @@ def get_product_info(url):
 
         price = None
 
-        whole = soup.select_one(
-            ".a-price-whole"
-        )
+        price_selectors = [
 
-        fraction = soup.select_one(
-            ".a-price-fraction"
-        )
+            ".a-price .a-offscreen",
 
-        if whole:
+            ".a-price-whole",
 
-            price_text = whole.text
+            "#priceblock_ourprice",
 
-            if fraction:
-                price_text += "." + fraction.text
+            "#priceblock_dealprice"
+        ]
 
-            price = parse_price(
-                price_text
-            )
+        for selector in price_selectors:
 
-        # FALLBACK PRICE
+            el = soup.select_one(selector)
 
-        if not price:
+            if el:
 
-            prices = re.findall(
-                r'[\d\.]+,\d+\s?TL',
-                page_text,
-                re.IGNORECASE
-            )
+                price = parse_price(
+                    el.text
+                )
 
-            if prices:
-                price = parse_price(prices[0])
+                if price:
+                    break
 
         # COUPON
 
@@ -226,56 +240,36 @@ def get_product_info(url):
 
         coupon_text = ""
 
-        coupon_patterns = [
-
-            r"kupon",
-
-            r"indirim",
-
-            r"sepette",
-
-            r"%\d+ indirim",
-
-            r"₺\d+ kupon"
-        ]
-
         texts = soup.find_all(string=True)
 
         for t in texts:
 
             txt = t.strip()
 
-            for pattern in coupon_patterns:
+            if any(
+                x in txt.lower()
+                for x in [
+                    "kupon",
+                    "indirim",
+                    "sepette"
+                ]
+            ):
 
-                if re.search(
-                    pattern,
-                    txt,
-                    re.IGNORECASE
-                ):
-
-                    coupon_exists = True
-                    coupon_text = txt
-                    break
-
-            if coupon_exists:
+                coupon_exists = True
+                coupon_text = txt
                 break
 
         # STOCK
 
         in_stock = True
 
-        stock_patterns = [
+        if (
+            "stokta yok" in page_text
+            or
+            "currently unavailable" in page_text
+        ):
 
-            "stokta yok",
-
-            "currently unavailable"
-        ]
-
-        for s in stock_patterns:
-
-            if s in page_text:
-                in_stock = False
-                break
+            in_stock = False
 
         return {
 
@@ -297,6 +291,7 @@ def get_product_info(url):
         print("SCRAPER ERROR:", e)
 
         return None
+
 
 # =========================================
 # TELEGRAM COMMANDS

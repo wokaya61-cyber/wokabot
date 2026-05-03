@@ -1,2 +1,1 @@
-worker: playwright install chromium && python amazon_price_bot.py
-
+worker: python -m playwright install chromium && python amazon_price_bot.py

@@ -201,7 +201,7 @@ def get_product_info(url):
 
         # SELLER CHECK
 
-        seller_ok = False
+        seller_ok = True
 
         seller_patterns = [
 
@@ -381,14 +381,6 @@ async def add_product(
 
         await update.message.reply_text(
             "❌ Ürün okunamadı."
-        )
-
-        return
-
-    if not info["seller_ok"]:
-
-        await update.message.reply_text(
-            "❌ Satıcı amazon.com.tr değil."
         )
 
         return

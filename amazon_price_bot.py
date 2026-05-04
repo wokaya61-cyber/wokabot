@@ -806,10 +806,10 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     coupon_line = f"🎟️ Kupon: {info.coupon_text}" if info.coupon_exists else "❌ Üründe kupon yok"
     await update.message.reply_text(
         "✅ Ürün eklendi\n\n"
-        f"📦 {info.title}\n"
-        f"💰 Fiyat: {format_money(info.price)} TL\n"
-        f"{coupon_line}\n"
-        f"🎯 Bildirim eşiği: %{drop_percent}\n"
+        f"📦 {info.title}\n\n"
+        f"💰 Fiyat: {format_money(info.price)} TL\n\n"
+        f"{coupon_line}\n\n"
+        f"🎯 Bildirim eşiği: %{drop_percent}\n\n"
         f"🔗 {url}"
     )
 
@@ -998,9 +998,9 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
             app,
             chat_id,
             "✅ Bekleyen ürün takibe alındı\n\n"
-            f"📦 {info.title}\n"
-            f"💰 Başlangıç fiyatı: {format_money(current_price)} TL\n"
-            f"{coupon_line}\n"
+            f"📦 {info.title}\n\n"
+            f"💰 Başlangıç fiyatı: {format_money(current_price)} TL\n\n"
+            f"{coupon_line}\n\n"
             f"🎯 Bildirim eşiği: %{drop_percent}",
             url,
         )

@@ -31,6 +31,8 @@ CAPTCHA_BACKOFF_SECONDS = int(os.getenv("CAPTCHA_BACKOFF_SECONDS", "300"))
 MAX_BACKOFF_SECONDS = int(os.getenv("MAX_BACKOFF_SECONDS", "3600"))
 
 AMAZON_HOSTS = {"amazon.com.tr", "www.amazon.com.tr"}
+RETRY_HTTP_STATUSES = {500, 502, 504}
+BLOCK_HTTP_STATUSES = {429, 503}
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -279,6 +281,16 @@ def fetch_product_info(url: str) -> ProductInfo | None:
     for attempt in range(1, HTTP_RETRIES + 1):
         try:
             response = http_session.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+            if response.status_code in RETRY_HTTP_STATUSES and attempt < HTTP_RETRIES:
+                logger.warning(
+                    "Amazon returned HTTP %s for %s. Attempt %s/%s",
+                    response.status_code,
+                    url,
+                    attempt,
+                    HTTP_RETRIES,
+                )
+                time.sleep(2 + attempt + random.uniform(0, 2))
+                continue
             break
         except Timeout as exc:
             last_error = exc
@@ -304,8 +316,11 @@ def fetch_product_info(url: str) -> ProductInfo | None:
     if response is None:
         raise AmazonReadError(f"Amazon sayfası okunamadı: {last_error}")
 
-    if response.status_code in {429, 503}:
+    if response.status_code in BLOCK_HTTP_STATUSES:
         raise AmazonBlockedError(f"Amazon geçici blok döndürdü: HTTP {response.status_code}")
+
+    if response.status_code in RETRY_HTTP_STATUSES:
+        raise AmazonReadError(f"Amazon geçici sunucu hatası döndürdü: HTTP {response.status_code}")
 
     response.raise_for_status()
 
@@ -416,7 +431,7 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except AmazonReadError as exc:
         logger.warning("Scrape read failed for %s: %s", url, exc)
         await update.message.reply_text(
-            "Ürün şu an Amazon tarafından yavaş cevapladığı için okunamadı. "
+            "Ürün şu an Amazon geçici hata verdiği veya yavaş cevapladığı için okunamadı. "
             "Biraz sonra tekrar /add komutunu deneyebilirsin."
         )
         return

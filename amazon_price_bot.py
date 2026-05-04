@@ -15,7 +15,7 @@ import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from flask import Flask
-from requests import HTTPError
+from requests import HTTPError, RequestException, Timeout
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -25,6 +25,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "10"))
 DATA_FILE = Path(os.getenv("DATA_FILE", "products.json"))
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "20"))
+HTTP_RETRIES = int(os.getenv("HTTP_RETRIES", "3"))
 MIN_PRODUCT_DELAY = int(os.getenv("MIN_PRODUCT_DELAY", "3"))
 CAPTCHA_BACKOFF_SECONDS = int(os.getenv("CAPTCHA_BACKOFF_SECONDS", "300"))
 MAX_BACKOFF_SECONDS = int(os.getenv("MAX_BACKOFF_SECONDS", "3600"))
@@ -45,6 +46,10 @@ logger = logging.getLogger("amazon-price-bot")
 
 
 class AmazonBlockedError(RuntimeError):
+    pass
+
+
+class AmazonReadError(RuntimeError):
     pass
 
 
@@ -268,7 +273,37 @@ def fetch_product_info(url: str) -> ProductInfo | None:
         "User-Agent": random.choice(USER_AGENTS),
     }
 
-    response = http_session.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+    response = None
+    last_error: Exception | None = None
+
+    for attempt in range(1, HTTP_RETRIES + 1):
+        try:
+            response = http_session.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+            break
+        except Timeout as exc:
+            last_error = exc
+            logger.warning(
+                "Amazon read timed out for %s. Attempt %s/%s",
+                url,
+                attempt,
+                HTTP_RETRIES,
+            )
+        except RequestException as exc:
+            last_error = exc
+            logger.warning(
+                "Amazon request failed for %s. Attempt %s/%s: %s",
+                url,
+                attempt,
+                HTTP_RETRIES,
+                exc,
+            )
+
+        if attempt < HTTP_RETRIES:
+            time.sleep(2 + attempt + random.uniform(0, 2))
+
+    if response is None:
+        raise AmazonReadError(f"Amazon sayfası okunamadı: {last_error}")
+
     if response.status_code in {429, 503}:
         raise AmazonBlockedError(f"Amazon geçici blok döndürdü: HTTP {response.status_code}")
 
@@ -378,6 +413,20 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     try:
         info = await scrape(url)
+    except AmazonReadError as exc:
+        logger.warning("Scrape read failed for %s: %s", url, exc)
+        await update.message.reply_text(
+            "Ürün şu an Amazon tarafından yavaş cevapladığı için okunamadı. "
+            "Biraz sonra tekrar /add komutunu deneyebilirsin."
+        )
+        return
+    except AmazonBlockedError as exc:
+        logger.warning("Scrape blocked for %s: %s", url, exc)
+        await update.message.reply_text(
+            "Amazon şu an bot doğrulaması veya geçici blok döndürdü. "
+            "Biraz bekleyip tekrar denemek daha sağlıklı olur."
+        )
+        return
     except Exception as exc:
         logger.exception("Scrape failed for %s", url)
         await update.message.reply_text(f"Ürün okunamadı: {exc}")
@@ -550,6 +599,11 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         set_backoff(product, "http_error")
         product["last_error"] = str(exc)
         logger.warning("HTTP error for %s: %s", url, exc)
+        return
+    except AmazonReadError as exc:
+        set_backoff(product, "timeout")
+        product["last_error"] = str(exc)
+        logger.warning("Read timeout for %s: %s", url, exc)
         return
     except Exception as exc:
         set_backoff(product, "read_error")

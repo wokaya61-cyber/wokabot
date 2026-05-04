@@ -35,6 +35,7 @@ python amazon_price_bot.py
 ## Notlar
 
 - Varsayılan tarama aralığı 10 saniyedir. Bunu `.env` içindeki `CHECK_INTERVAL` ile değiştirebilirsiniz.
+- Amazon yavaş cevap verirse bot `HTTP_RETRIES` kadar yeniden dener. Timeout süresini `HTTP_TIMEOUT` ile artırabilirsiniz.
 - Amazon zaman zaman bot doğrulaması döndürebilir. Böyle bir durumda ürün atlanır, bot çalışmaya devam eder.
 - Captcha veya geçici blok algılanırsa bot aynı ürünü bir süre bekletir. Bekleme süresini `.env` içindeki `CAPTCHA_BACKOFF_SECONDS` ve `MAX_BACKOFF_SECONDS` ile ayarlayabilirsiniz.
 - Bot yalnızca satıcısı amazon.com.tr olarak algılanan ürünleri takip listesine ekler ve bildirir.

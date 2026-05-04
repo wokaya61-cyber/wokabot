@@ -464,9 +464,12 @@ def fetch_product_info(url: str) -> ProductInfo | None:
 
 
 def format_money(value: Decimal | str | float | int | None) -> str:
-    if value is None:
+    if value is None or value == "":
         return "?"
-    decimal = Decimal(str(value))
+    try:
+        decimal = Decimal(str(value))
+    except InvalidOperation:
+        return "?"
     return f"{decimal:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
@@ -482,6 +485,12 @@ def product_label(product: dict[str, Any]) -> str:
 
 
 def product_status_line(product: dict[str, Any]) -> str:
+    if product.get("pending_initial_price"):
+        return "⏳ İlk başarılı fiyat okuması bekleniyor"
+
+    if product.get("disabled"):
+        return f"⛔ Pasif: {product.get('last_error', 'takip durduruldu')}"
+
     next_check_at = int(product.get("next_check_at", 0) or 0)
     if next_check_at > now_ts():
         wait_seconds = next_check_at - now_ts()
@@ -505,6 +514,33 @@ async def notify(app: Application, chat_id: str, text: str, url: str) -> None:
         reply_markup=InlineKeyboardMarkup(keyboard),
         disable_web_page_preview=True,
     )
+
+
+async def add_pending_product(chat_id: str, url: str, drop_percent: Decimal, reason: str, title: str = "") -> bool:
+    product = {
+        "url": url,
+        "title": title or "Ürün okunmayı bekliyor",
+        "base_price": "",
+        "last_price": "",
+        "drop_percent": str(drop_percent),
+        "coupon_notified": False,
+        "last_coupon_text": "",
+        "pending_initial_price": True,
+        "failure_count": 0,
+        "last_error": reason,
+        "next_check_at": now_ts() + 60,
+        "created_at": int(time.time()),
+    }
+
+    async with data_lock:
+        chat_products = products.setdefault(chat_id, [])
+        if any(item.get("url") == url for item in chat_products):
+            return False
+
+        chat_products.append(product)
+        save_data(products)
+
+    return True
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -539,22 +575,30 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("Yüzde değeri 0'dan büyük olmalı.")
         return
 
+    async with data_lock:
+        if any(item.get("url") == url for item in products.get(chat_id, [])):
+            await update.message.reply_text("Bu ürün zaten takip listende.")
+            return
+
     await update.message.reply_text("Ürünü okuyorum, birkaç saniye sürebilir...")
 
     try:
         info = await scrape(url)
     except AmazonReadError as exc:
         logger.warning("Scrape read failed for %s: %s", url, exc)
+        await add_pending_product(chat_id, url, drop_percent, "timeout")
         await update.message.reply_text(
-            "Ürün şu an Amazon geçici hata verdiği veya yavaş cevapladığı için okunamadı. "
-            "Biraz sonra tekrar /add komutunu deneyebilirsin."
+            "⏳ Ürün şu an Amazon geçici hata verdiği veya yavaş cevapladığı için okunamadı.\n\n"
+            "Link takip listesine beklemede olarak eklendi. Bot arkada denemeye devam edecek; "
+            "ilk başarılı okumada fiyatı başlangıç fiyatı olarak kaydedecek."
         )
         return
     except AmazonBlockedError as exc:
         logger.warning("Scrape blocked for %s: %s", url, exc)
+        await add_pending_product(chat_id, url, drop_percent, "captcha")
         await update.message.reply_text(
-            "Amazon şu an bot doğrulaması veya geçici blok döndürdü. "
-            "Biraz bekleyip tekrar denemek daha sağlıklı olur."
+            "⏳ Amazon şu an bot doğrulaması veya geçici blok döndürdü.\n\n"
+            "Link takip listesine beklemede olarak eklendi. Bot biraz bekleyip arkada tekrar deneyecek."
         )
         return
     except Exception as exc:
@@ -563,16 +607,19 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if not info:
+        await add_pending_product(chat_id, url, drop_percent, "empty_product")
         await update.message.reply_text(
-            "Ürün okunamadı. Amazon ürün detayını tam döndürmedi; biraz sonra tekrar deneyebilirsin."
+            "⏳ Ürün detayları şu an tam okunamadı.\n\n"
+            "Link takip listesine beklemede olarak eklendi. Bot arkada tekrar deneyecek."
         )
         return
 
     if not info.price:
+        await add_pending_product(chat_id, url, drop_percent, "price_missing", info.title)
         await update.message.reply_text(
-            "Ürün bulundu ama fiyat okunamadı.\n\n"
+            "⏳ Ürün bulundu ama fiyat şu an okunamadı.\n\n"
             f"📦 {info.title}\n"
-            "Amazon bu üründe fiyat alanını farklı/kapalı döndürmüş olabilir."
+            "Link takip listesine beklemede olarak eklendi. Bot arkada tekrar deneyecek."
         )
         return
 
@@ -586,10 +633,6 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     async with data_lock:
         chat_products = products.setdefault(chat_id, [])
-        if any(item.get("url") == url for item in chat_products):
-            await update.message.reply_text("Bu ürün zaten takip listende.")
-            return
-
         chat_products.append(
             {
                 "url": url,
@@ -721,6 +764,9 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def check_product(app: Application, chat_id: str, product: dict[str, Any]) -> None:
     url = product.get("url", "")
 
+    if product.get("disabled"):
+        return
+
     if not is_due(product):
         return
 
@@ -760,16 +806,50 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
 
     if not info.seller_ok:
         product["seller_ok"] = False
+        if product.get("pending_initial_price"):
+            product["disabled"] = True
+            product["last_error"] = "Satıcı amazon.com.tr değil"
+            await notify(
+                app,
+                chat_id,
+                "⛔ Ürün takip dışı bırakıldı\n\n"
+                f"📦 {info.title}\n"
+                "Satıcı amazon.com.tr olarak görünmediği için takip başlatılmadı.",
+                url,
+            )
         return
 
     product["seller_ok"] = True
 
     if not info.price:
+        set_backoff(product, "price_missing")
+        return
+
+    current_price = info.price
+    drop_percent = Decimal(str(product.get("drop_percent", "0")))
+
+    if product.get("pending_initial_price") or not product.get("base_price"):
+        product["base_price"] = str(current_price)
+        product["last_price"] = str(current_price)
+        product["pending_initial_price"] = False
+        product["coupon_notified"] = info.coupon_exists
+        product["last_coupon_text"] = info.coupon_text
+        product["in_stock"] = info.in_stock
+
+        coupon_line = f"🎟️ Kupon: {info.coupon_text}" if info.coupon_exists else "❌ Üründe kupon yok"
+        await notify(
+            app,
+            chat_id,
+            "✅ Bekleyen ürün takibe alındı\n\n"
+            f"📦 {info.title}\n"
+            f"💰 Başlangıç fiyatı: {format_money(current_price)} TL\n"
+            f"{coupon_line}\n"
+            f"🎯 Bildirim eşiği: %{drop_percent}",
+            url,
+        )
         return
 
     old_price = Decimal(str(product.get("base_price") or product.get("last_price") or info.price))
-    current_price = info.price
-    drop_percent = Decimal(str(product.get("drop_percent", "0")))
     drop = calculate_drop(old_price, current_price)
 
     if drop >= drop_percent:

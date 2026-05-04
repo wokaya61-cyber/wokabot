@@ -27,6 +27,7 @@ DATA_FILE = Path(os.getenv("DATA_FILE", "products.json"))
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "20"))
 HTTP_RETRIES = int(os.getenv("HTTP_RETRIES", "3"))
 MIN_PRODUCT_DELAY = int(os.getenv("MIN_PRODUCT_DELAY", "3"))
+PENDING_RETRY_SECONDS = int(os.getenv("PENDING_RETRY_SECONDS", "10"))
 CAPTCHA_BACKOFF_SECONDS = int(os.getenv("CAPTCHA_BACKOFF_SECONDS", "300"))
 MAX_BACKOFF_SECONDS = int(os.getenv("MAX_BACKOFF_SECONDS", "3600"))
 
@@ -111,6 +112,10 @@ def clean_amazon_url(url: str) -> str:
     return f"https://www.amazon.com.tr/dp/{match.group(1).upper()}"
 
 
+def mobile_amazon_url(url: str) -> str:
+    return url.replace("https://www.amazon.com.tr/", "https://www.amazon.com.tr/gp/aw/")
+
+
 def money_to_decimal(value: str) -> Decimal | None:
     value = value.replace("\xa0", " ").strip()
     value = re.sub(r"[^\d,\.]", "", value)
@@ -145,9 +150,13 @@ def is_due(product: dict[str, Any]) -> bool:
 
 def set_backoff(product: dict[str, Any], reason: str) -> None:
     failures = int(product.get("failure_count", 0) or 0) + 1
-    base_delay = CAPTCHA_BACKOFF_SECONDS if reason == "captcha" else 60
+    if product.get("pending_initial_price"):
+        base_delay = PENDING_RETRY_SECONDS
+    else:
+        base_delay = CAPTCHA_BACKOFF_SECONDS if reason == "captcha" else 30
+
     delay = min(base_delay * (2 ** min(failures - 1, 4)), MAX_BACKOFF_SECONDS)
-    delay += random.randint(0, min(60, max(1, delay // 5)))
+    delay += random.randint(0, min(10, max(1, delay // 5)))
 
     product["failure_count"] = failures
     product["next_check_at"] = now_ts() + delay
@@ -440,18 +449,7 @@ def parse_coupon(soup: BeautifulSoup) -> tuple[bool, str]:
     return True, coupon_text[:240]
 
 
-def fetch_product_info(url: str) -> ProductInfo | None:
-    headers = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.7,en;q=0.6",
-        "Connection": "keep-alive",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-        "Referer": "https://www.amazon.com.tr/",
-        "Upgrade-Insecure-Requests": "1",
-        "User-Agent": random.choice(USER_AGENTS),
-    }
-
+def fetch_html(url: str, headers: dict[str, str]) -> str:
     response = None
     last_error: Exception | None = None
 
@@ -466,7 +464,7 @@ def fetch_product_info(url: str) -> ProductInfo | None:
                     attempt,
                     HTTP_RETRIES,
                 )
-                time.sleep(2 + attempt + random.uniform(0, 2))
+                time.sleep(0.7 + random.uniform(0, 0.8))
                 continue
             break
         except Timeout as exc:
@@ -488,7 +486,7 @@ def fetch_product_info(url: str) -> ProductInfo | None:
             )
 
         if attempt < HTTP_RETRIES:
-            time.sleep(2 + attempt + random.uniform(0, 2))
+            time.sleep(0.7 + random.uniform(0, 0.8))
 
     if response is None:
         raise AmazonReadError(f"Amazon sayfası okunamadı: {last_error}")
@@ -500,8 +498,11 @@ def fetch_product_info(url: str) -> ProductInfo | None:
         raise AmazonReadError(f"Amazon geçici sunucu hatası döndürdü: HTTP {response.status_code}")
 
     response.raise_for_status()
+    return response.text
 
-    soup = BeautifulSoup(response.text, "html.parser")
+
+def parse_product_html(html: str) -> ProductInfo | None:
+    soup = BeautifulSoup(html, "html.parser")
     title = parse_title(soup)
     page_text = soup.get_text(" ", strip=True).casefold()
 
@@ -516,13 +517,46 @@ def fetch_product_info(url: str) -> ProductInfo | None:
 
     return ProductInfo(
         title=title,
-        price=parse_price(soup, response.text),
+        price=parse_price(soup, html),
         seller_ok=seller_ok,
         seller_text=seller_text,
         coupon_exists=coupon_exists,
         coupon_text=coupon_text,
         in_stock=parse_stock(soup),
     )
+
+
+def fetch_product_info(url: str) -> ProductInfo | None:
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.7,en;q=0.6",
+        "Connection": "keep-alive",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Referer": "https://www.amazon.com.tr/",
+        "Upgrade-Insecure-Requests": "1",
+        "User-Agent": random.choice(USER_AGENTS),
+    }
+
+    errors: list[str] = []
+    for candidate_url in [url, mobile_amazon_url(url)]:
+        try:
+            html = fetch_html(candidate_url, headers)
+            info = parse_product_html(html)
+            if info and info.price:
+                return info
+
+            if info:
+                errors.append(f"{candidate_url}: fiyat yok")
+        except AmazonBlockedError:
+            raise
+        except Exception as exc:
+            errors.append(f"{candidate_url}: {exc}")
+
+    if errors:
+        raise AmazonReadError(" / ".join(errors[-2:]))
+
+    return None
 
 
 def format_money(value: Decimal | str | float | int | None) -> str:

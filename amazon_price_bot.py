@@ -361,14 +361,14 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         save_data(products)
 
-    coupon_line = f"Kupon: {info.coupon_text}" if info.coupon_exists else "Kupon yok"
+    coupon_line = f"🎟️ Kupon: {info.coupon_text}" if info.coupon_exists else "❌ Üründe kupon yok"
     await update.message.reply_text(
-        "Ürün eklendi.\n\n"
-        f"{info.title}\n"
-        f"Fiyat: {format_money(info.price)} TL\n"
+        "✅ Ürün eklendi\n\n"
+        f"📦 {info.title}\n"
+        f"💰 Fiyat: {format_money(info.price)} TL\n"
         f"{coupon_line}\n"
-        f"Bildirim eşiği: %{drop_percent}\n"
-        f"{url}"
+        f"🎯 Bildirim eşiği: %{drop_percent}\n"
+        f"🔗 {url}"
     )
 
 
@@ -439,7 +439,7 @@ async def set_drop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         product["drop_percent"] = str(drop_percent)
         save_data(products)
 
-    await update.message.reply_text(f"Bildirim eşiği güncellendi: %{drop_percent}")
+    await update.message.reply_text(f"🎯 Bildirim eşiği güncellendi: %{drop_percent}")
 
 
 async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -450,14 +450,14 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Takip listen boş.")
         return
 
-    lines = ["Takip edilen ürünler:\n"]
+    lines = ["📋 Takip edilen ürünler:\n"]
     for index, product in enumerate(chat_products, start=1):
         lines.extend(
             [
-                f"{index}. {product_label(product)}",
-                f"Fiyat: {format_money(product.get('last_price'))} TL",
-                f"Eşik: %{product.get('drop_percent')}",
-                product.get("url", ""),
+                f"{index}. 📦 {product_label(product)}",
+                f"💰 Fiyat: {format_money(product.get('last_price'))} TL",
+                f"🎯 Eşik: %{product.get('drop_percent')}",
+                f"🔗 {product.get('url', '')}",
                 "",
             ]
         )
@@ -506,11 +506,11 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         await notify(
             app,
             chat_id,
-            "Fiyat düştü.\n\n"
-            f"{info.title}\n"
-            f"Eski fiyat: {format_money(old_price)} TL\n"
-            f"Yeni fiyat: {format_money(current_price)} TL\n"
-            f"Düşüş: %{drop:.2f}",
+            "🔥 Fiyat düştü\n\n"
+            f"📦 {info.title}\n"
+            f"💸 Eski fiyat: {format_money(old_price)} TL\n"
+            f"💰 Yeni fiyat: {format_money(current_price)} TL\n"
+            f"📉 Düşüş: %{drop:.2f}",
             url,
         )
         product["base_price"] = str(current_price)
@@ -520,9 +520,9 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         await notify(
             app,
             chat_id,
-            "Kupon bulundu.\n\n"
-            f"{info.title}\n"
-            f"{info.coupon_text}",
+            "🎟️ Kupon bulundu\n\n"
+            f"📦 {info.title}\n"
+            f"🧾 {info.coupon_text}",
             url,
         )
         product["coupon_notified"] = True

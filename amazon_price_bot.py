@@ -15,6 +15,7 @@ import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from flask import Flask
+from requests import HTTPError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -24,6 +25,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "10"))
 DATA_FILE = Path(os.getenv("DATA_FILE", "products.json"))
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "20"))
+MIN_PRODUCT_DELAY = int(os.getenv("MIN_PRODUCT_DELAY", "3"))
+CAPTCHA_BACKOFF_SECONDS = int(os.getenv("CAPTCHA_BACKOFF_SECONDS", "300"))
+MAX_BACKOFF_SECONDS = int(os.getenv("MAX_BACKOFF_SECONDS", "3600"))
 
 AMAZON_HOSTS = {"amazon.com.tr", "www.amazon.com.tr"}
 USER_AGENTS = [
@@ -38,6 +42,13 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger("amazon-price-bot")
+
+
+class AmazonBlockedError(RuntimeError):
+    pass
+
+
+http_session = requests.Session()
 
 
 @dataclass
@@ -115,6 +126,31 @@ def money_to_decimal(value: str) -> Decimal | None:
 
 def parse_percent(value: str) -> Decimal:
     return Decimal(value.strip().replace("%", "").replace(",", "."))
+
+
+def now_ts() -> int:
+    return int(time.time())
+
+
+def is_due(product: dict[str, Any]) -> bool:
+    return now_ts() >= int(product.get("next_check_at", 0) or 0)
+
+
+def set_backoff(product: dict[str, Any], reason: str) -> None:
+    failures = int(product.get("failure_count", 0) or 0) + 1
+    base_delay = CAPTCHA_BACKOFF_SECONDS if reason == "captcha" else 60
+    delay = min(base_delay * (2 ** min(failures - 1, 4)), MAX_BACKOFF_SECONDS)
+    delay += random.randint(0, min(60, max(1, delay // 5)))
+
+    product["failure_count"] = failures
+    product["next_check_at"] = now_ts() + delay
+    product["last_error"] = reason
+
+
+def clear_backoff(product: dict[str, Any]) -> None:
+    product["failure_count"] = 0
+    product["next_check_at"] = now_ts() + MIN_PRODUCT_DELAY + random.randint(0, 7)
+    product["last_error"] = ""
 
 
 def first_text(soup: BeautifulSoup, selectors: list[str]) -> str:
@@ -224,21 +260,28 @@ def fetch_product_info(url: str) -> ProductInfo | None:
     headers = {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.7,en;q=0.6",
+        "Connection": "keep-alive",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
+        "Referer": "https://www.amazon.com.tr/",
+        "Upgrade-Insecure-Requests": "1",
         "User-Agent": random.choice(USER_AGENTS),
     }
 
-    response = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+    response = http_session.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+    if response.status_code in {429, 503}:
+        raise AmazonBlockedError(f"Amazon geçici blok döndürdü: HTTP {response.status_code}")
+
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
     title = first_text(soup, ["#productTitle", "span#title", "h1"])
+    page_text = soup.get_text(" ", strip=True).casefold()
+
+    if any(marker in page_text for marker in ["captcha", "robot check", "automated access"]):
+        raise AmazonBlockedError("Amazon bot doğrulama sayfası döndürdü.")
 
     if not title:
-        page_text = soup.get_text(" ", strip=True).casefold()
-        if "captcha" in page_text or "robot" in page_text:
-            raise RuntimeError("Amazon bot doğrulama sayfası döndürdü.")
         return None
 
     seller_ok, seller_text = parse_seller(soup)
@@ -271,6 +314,18 @@ def calculate_drop(old_price: Decimal, new_price: Decimal) -> Decimal:
 def product_label(product: dict[str, Any]) -> str:
     title = product.get("title") or product.get("url", "Ürün")
     return title if len(title) <= 90 else f"{title[:87]}..."
+
+
+def product_status_line(product: dict[str, Any]) -> str:
+    next_check_at = int(product.get("next_check_at", 0) or 0)
+    if next_check_at > now_ts():
+        wait_seconds = next_check_at - now_ts()
+        return f"⏳ Sonraki kontrol: yaklaşık {max(1, wait_seconds // 60)} dk sonra"
+
+    if product.get("last_error"):
+        return f"⚠️ Son durum: {product['last_error']}"
+
+    return "✅ Kontrol aktif"
 
 
 async def scrape(url: str) -> ProductInfo | None:
@@ -355,7 +410,9 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "drop_percent": str(drop_percent),
                 "coupon_notified": info.coupon_exists,
                 "last_coupon_text": info.coupon_text,
+                "failure_count": 0,
                 "last_error": "",
+                "next_check_at": now_ts() + MIN_PRODUCT_DELAY,
                 "created_at": int(time.time()),
             }
         )
@@ -457,6 +514,7 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 f"{index}. 📦 {product_label(product)}",
                 f"💰 Fiyat: {format_money(product.get('last_price'))} TL",
                 f"🎯 Eşik: %{product.get('drop_percent')}",
+                product_status_line(product),
                 f"🔗 {product.get('url', '')}",
                 "",
             ]
@@ -474,19 +532,37 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def check_product(app: Application, chat_id: str, product: dict[str, Any]) -> None:
     url = product.get("url", "")
 
+    if not is_due(product):
+        return
+
     try:
         info = await scrape(url)
+    except AmazonBlockedError as exc:
+        set_backoff(product, "captcha")
+        logger.warning(
+            "Amazon blocked check for %s. Backoff until %s: %s",
+            url,
+            product.get("next_check_at"),
+            exc,
+        )
+        return
+    except HTTPError as exc:
+        set_backoff(product, "http_error")
+        product["last_error"] = str(exc)
+        logger.warning("HTTP error for %s: %s", url, exc)
+        return
     except Exception as exc:
+        set_backoff(product, "read_error")
         product["last_error"] = str(exc)
         logger.warning("Check failed for %s: %s", url, exc)
         return
 
     if not info:
-        product["last_error"] = "Ürün okunamadı."
+        set_backoff(product, "empty_product")
         return
 
     product["title"] = info.title
-    product["last_error"] = ""
+    clear_backoff(product)
 
     if not info.seller_ok:
         product["seller_ok"] = False

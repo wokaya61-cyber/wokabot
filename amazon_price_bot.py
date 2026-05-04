@@ -170,10 +170,110 @@ def first_text(soup: BeautifulSoup, selectors: list[str]) -> str:
     return ""
 
 
-def parse_price(soup: BeautifulSoup) -> Decimal | None:
+def first_attr(soup: BeautifulSoup, selectors: list[str], attr: str) -> str:
+    for selector in selectors:
+        element = soup.select_one(selector)
+        if element and element.get(attr):
+            text = " ".join(str(element[attr]).split())
+            if text:
+                return text
+    return ""
+
+
+def parse_title(soup: BeautifulSoup) -> str:
+    title = first_text(soup, ["#productTitle", "span#title", "h1"])
+    if title:
+        return title
+
+    title = first_attr(
+        soup,
+        [
+            "meta[property='og:title']",
+            "meta[name='twitter:title']",
+            "meta[name='title']",
+        ],
+        "content",
+    )
+    if title:
+        return re.sub(r"\s*:\s*Amazon\.com\.tr\s*$", "", title).strip()
+
+    return first_text(soup, ["title"])
+
+
+def find_price_in_json(data: Any, currency_seen: bool = False) -> Decimal | None:
+    if isinstance(data, dict):
+        local_currency = currency_seen or any(
+            str(value).upper() in {"TRY", "TL"}
+            for key, value in data.items()
+            if "currency" in str(key).casefold()
+        )
+
+        if local_currency:
+            for key in ["price", "priceAmount", "amount", "value", "lowPrice"]:
+                if key in data:
+                    price = money_to_decimal(str(data[key]))
+                    if price and price > 0:
+                        return price
+
+        for value in data.values():
+            price = find_price_in_json(value, local_currency)
+            if price:
+                return price
+
+    if isinstance(data, list):
+        for item in data:
+            price = find_price_in_json(item, currency_seen)
+            if price:
+                return price
+
+    if isinstance(data, str) and "TL" in data:
+        price = money_to_decimal(data)
+        if price and price > 0:
+            return price
+
+    return None
+
+
+def parse_price_from_scripts(soup: BeautifulSoup, html: str) -> Decimal | None:
+    for script in soup.select("script[type='application/ld+json']"):
+        text = script.string or script.get_text(strip=True)
+        if not text:
+            continue
+
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+
+        price = find_price_in_json(data)
+        if price:
+            return price
+
+    patterns = [
+        r'"displayPrice"\s*:\s*"([^"]*?TL)"',
+        r'"priceString"\s*:\s*"([^"]*?TL)"',
+        r'"priceToPay"\s*:\s*\{[^{}]*?"displayString"\s*:\s*"([^"]*?TL)"',
+        r'"priceAmount"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, html)
+        if match:
+            price = money_to_decimal(match.group(1))
+            if price and price > 0:
+                return price
+
+    return None
+
+
+def parse_price(soup: BeautifulSoup, html: str = "") -> Decimal | None:
     selectors = [
+        "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen",
+        "#corePriceDisplay_mobile_feature_div .a-price .a-offscreen",
         "#corePrice_feature_div .a-price .a-offscreen",
         "#apex_desktop .a-price .a-offscreen",
+        ".priceToPay .a-offscreen",
+        "span[data-a-color='price'] .a-offscreen",
         "#priceblock_dealprice",
         "#priceblock_ourprice",
         "#price_inside_buybox",
@@ -185,6 +285,21 @@ def parse_price(soup: BeautifulSoup) -> Decimal | None:
             price = money_to_decimal(element.get_text(" ", strip=True))
             if price and price > 0:
                 return price
+
+    for selector in [
+        "meta[property='product:price:amount']",
+        "meta[itemprop='price']",
+        "[itemprop='price']",
+    ]:
+        for element in soup.select(selector):
+            raw_price = element.get("content") or element.get_text(" ", strip=True)
+            price = money_to_decimal(str(raw_price))
+            if price and price > 0:
+                return price
+
+    script_price = parse_price_from_scripts(soup, html)
+    if script_price:
+        return script_price
 
     body_text = soup.get_text(" ", strip=True)
     match = re.search(r"(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)\s*TL", body_text)
@@ -325,7 +440,7 @@ def fetch_product_info(url: str) -> ProductInfo | None:
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
-    title = first_text(soup, ["#productTitle", "span#title", "h1"])
+    title = parse_title(soup)
     page_text = soup.get_text(" ", strip=True).casefold()
 
     if any(marker in page_text for marker in ["captcha", "robot check", "automated access"]):
@@ -339,7 +454,7 @@ def fetch_product_info(url: str) -> ProductInfo | None:
 
     return ProductInfo(
         title=title,
-        price=parse_price(soup),
+        price=parse_price(soup, response.text),
         seller_ok=seller_ok,
         seller_text=seller_text,
         coupon_exists=coupon_exists,
@@ -447,8 +562,18 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(f"Ürün okunamadı: {exc}")
         return
 
-    if not info or not info.price:
-        await update.message.reply_text("Ürün veya fiyat okunamadı.")
+    if not info:
+        await update.message.reply_text(
+            "Ürün okunamadı. Amazon ürün detayını tam döndürmedi; biraz sonra tekrar deneyebilirsin."
+        )
+        return
+
+    if not info.price:
+        await update.message.reply_text(
+            "Ürün bulundu ama fiyat okunamadı.\n\n"
+            f"📦 {info.title}\n"
+            "Amazon bu üründe fiyat alanını farklı/kapalı döndürmüş olabilir."
+        )
         return
 
     if not info.seller_ok:

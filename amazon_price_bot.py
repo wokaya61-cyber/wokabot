@@ -30,6 +30,7 @@ MIN_PRODUCT_DELAY = int(os.getenv("MIN_PRODUCT_DELAY", "3"))
 PENDING_RETRY_SECONDS = int(os.getenv("PENDING_RETRY_SECONDS", "10"))
 CAPTCHA_BACKOFF_SECONDS = int(os.getenv("CAPTCHA_BACKOFF_SECONDS", "300"))
 MAX_BACKOFF_SECONDS = int(os.getenv("MAX_BACKOFF_SECONDS", "3600"))
+MAX_CONCURRENT_CHECKS = int(os.getenv("MAX_CONCURRENT_CHECKS", "3"))
 
 AMAZON_HOSTS = {"amazon.com.tr", "www.amazon.com.tr"}
 RETRY_HTTP_STATUSES = {500, 502, 504}
@@ -852,9 +853,9 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Elle kontrol başlatıldı.")
-    await check_all_products(context.application, manual_chat_id=str(update.effective_chat.id))
-    await update.message.reply_text("Kontrol tamamlandı.")
+    chat_id = str(update.effective_chat.id)
+    context.application.create_task(check_all_products(context.application, manual_chat_id=chat_id))
+    await update.message.reply_text("✅ Elle kontrol arka planda başlatıldı.")
 
 
 async def check_product(app: Application, chat_id: str, product: dict[str, Any]) -> None:
@@ -995,20 +996,36 @@ async def check_all_products(app: Application, manual_chat_id: str | None = None
             for product in products.get(chat_id, [])
         ]
 
-    changed = False
-    for chat_id, product in targets:
-        await check_product(app, chat_id, product)
-        changed = True
+    if not targets:
+        return
 
-    if changed:
-        async with data_lock:
-            save_data(products)
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_CHECKS)
+
+    async def run_one(chat_id: str, product: dict[str, Any]) -> None:
+        async with semaphore:
+            await check_product(app, chat_id, product)
+
+    await asyncio.gather(
+        *(run_one(chat_id, product) for chat_id, product in targets),
+        return_exceptions=True,
+    )
+
+    async with data_lock:
+        save_data(products)
 
 
 async def background_checker(app: Application) -> None:
     while True:
-        await check_all_products(app)
+        try:
+            await check_all_products(app)
+        except Exception:
+            logger.exception("Background checker crashed during a cycle")
+
         await asyncio.sleep(CHECK_INTERVAL)
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Telegram handler error", exc_info=context.error)
 
 
 async def post_init(app: Application) -> None:
@@ -1044,6 +1061,7 @@ def main() -> None:
     app.add_handler(CommandHandler("setdrop", set_drop))
     app.add_handler(CommandHandler("list", list_products))
     app.add_handler(CommandHandler("check", check_command))
+    app.add_error_handler(error_handler)
 
     logger.info("Telegram bot started.")
     app.run_polling()

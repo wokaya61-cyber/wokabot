@@ -417,6 +417,44 @@ def parse_stock(soup: BeautifulSoup) -> bool:
     return True
 
 
+def normalize_promo_text(text: str) -> str:
+    replacements = str.maketrans(
+        {
+            "ı": "i",
+            "İ": "i",
+            "ğ": "g",
+            "Ğ": "g",
+            "ü": "u",
+            "Ü": "u",
+            "ş": "s",
+            "Ş": "s",
+            "ö": "o",
+            "Ö": "o",
+            "ç": "c",
+            "Ç": "c",
+        }
+    )
+    return " ".join(text.translate(replacements).casefold().split())
+
+
+def promotion_match(text: str) -> str:
+    normalized = normalize_promo_text(text)
+    promo_patterns = [
+        r"(?:kupon|kuponu).{0,80}?(?:uygula|tl|%)",
+        r"(?:\d{1,5}(?:[.,]\d{1,2})?\s*tl|%\s*\d{1,2}).{0,80}?(?:kupon|kuponu).{0,80}?(?:uygula)?",
+        r"odeme.{0,60}?(?:esnasinda|sirasinda).{0,80}?(?:\d{1,5}(?:[.,]\d{1,2})?\s*tl|%\s*\d{1,2}).{0,80}?(?:tasarruf|indirim)",
+        r"(?:\d+\s*(?:veya)?\s*daha\s*fazla\s*al|daha\s*fazla\s*al).{0,80}?%\s*\d{1,2}.{0,80}?indirim\s*kazan",
+        r"cok\s*al.{0,40}?(?:az\s*ode|indirim).{0,80}?(?:%\s*\d{1,2}|\d{1,5}(?:[.,]\d{1,2})?\s*tl)",
+    ]
+
+    for pattern in promo_patterns:
+        match = re.search(pattern, normalized, re.I)
+        if match:
+            return text[:240]
+
+    return ""
+
+
 def parse_coupon(soup: BeautifulSoup) -> tuple[bool, str]:
     candidates: list[str] = []
     selectors = [
@@ -428,20 +466,38 @@ def parse_coupon(soup: BeautifulSoup) -> tuple[bool, str]:
         "#coupon_feature_div",
         "#promoPriceBlockMessage_feature_div [id*='coupon']",
         "[data-csa-c-slot-id*='coupon']",
+        "#promoPriceBlockMessage_feature_div",
+        "#reinvent_price_desktop_pickupOfferDisplay_feature_div",
+        "#corePriceDisplay_desktop_feature_div",
+        "#corePriceDisplay_mobile_feature_div",
+        "#apex_desktop",
+        "#desktop_buybox",
+        "#buybox",
+        "#qualifiedBuyBox",
+        "#tmmSwatches",
+        "#ppd #centerCol",
     ]
 
     for selector in selectors:
         for element in soup.select(selector):
-            text = " ".join(element.get_text(" ", strip=True).split())
-            lower = text.casefold()
-            if not text or "kupon" not in lower:
-                continue
+            text_candidates: list[str] = []
+            direct_text = " ".join(element.get_text(" ", strip=True).split())
+            if direct_text and len(direct_text) <= 300:
+                text_candidates.append(direct_text)
 
-            if any(skip in lower for skip in ["prime", "banner", "çok al az öde", "cok al az ode"]):
-                continue
+            for child in element.select("span, label, div, a, td"):
+                child_text = " ".join(child.get_text(" ", strip=True).split())
+                if child_text and len(child_text) <= 300:
+                    text_candidates.append(child_text)
 
-            if re.search(r"(kupon|kuponu).{0,120}?(tl|%)|(?:tl|%).{0,120}?(kupon|kuponu)", text, re.I):
-                candidates.append(text)
+            for text in dict.fromkeys(text_candidates):
+                normalized = normalize_promo_text(text)
+                if any(skip in normalized for skip in ["sponsorlu", "whatsapp", "arama yapin"]):
+                    continue
+
+                matched_text = promotion_match(text)
+                if matched_text:
+                    candidates.append(matched_text)
 
     if not candidates:
         return False, ""

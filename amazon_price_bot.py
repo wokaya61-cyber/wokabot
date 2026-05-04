@@ -266,18 +266,56 @@ def parse_price_from_scripts(soup: BeautifulSoup, html: str) -> Decimal | None:
     return None
 
 
+def price_from_container(container: Any) -> Decimal | None:
+    offscreen = container.select_one(".a-price .a-offscreen, .a-offscreen")
+    if offscreen:
+        price = money_to_decimal(offscreen.get_text(" ", strip=True))
+        if price and price > 0:
+            return price
+
+    whole = container.select_one(".a-price-whole")
+    fraction = container.select_one(".a-price-fraction")
+    if whole:
+        whole_text = whole.get_text("", strip=True)
+        fraction_text = fraction.get_text("", strip=True) if fraction else "00"
+        price = money_to_decimal(f"{whole_text},{fraction_text}")
+        if price and price > 0:
+            return price
+
+    return None
+
+
 def parse_price(soup: BeautifulSoup, html: str = "") -> Decimal | None:
+    price_containers = [
+        "#corePriceDisplay_desktop_feature_div .priceToPay",
+        "#corePriceDisplay_mobile_feature_div .priceToPay",
+        "#corePrice_feature_div .priceToPay",
+        "#apex_desktop .priceToPay",
+        "#tp_price_block_total_price_ww",
+        "#newBuyBoxPrice",
+        "#price_inside_buybox",
+        "#corePriceDisplay_desktop_feature_div",
+        "#corePriceDisplay_mobile_feature_div",
+        "#corePrice_feature_div",
+    ]
+
+    for selector in price_containers:
+        for container in soup.select(selector):
+            price = price_from_container(container)
+            if price and price > 0:
+                return price
+
     selectors = [
-        "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen",
-        "#corePriceDisplay_mobile_feature_div .a-price .a-offscreen",
-        "#corePrice_feature_div .a-price .a-offscreen",
-        "#apex_desktop .a-price .a-offscreen",
+        "#corePriceDisplay_desktop_feature_div .priceToPay .a-offscreen",
+        "#corePriceDisplay_mobile_feature_div .priceToPay .a-offscreen",
+        "#corePrice_feature_div .priceToPay .a-offscreen",
+        "#apex_desktop .priceToPay .a-offscreen",
         ".priceToPay .a-offscreen",
-        "span[data-a-color='price'] .a-offscreen",
+        "#corePriceDisplay_desktop_feature_div span[data-a-color='price'] .a-offscreen",
+        "#corePriceDisplay_mobile_feature_div span[data-a-color='price'] .a-offscreen",
         "#priceblock_dealprice",
         "#priceblock_ourprice",
         "#price_inside_buybox",
-        ".a-price .a-offscreen",
     ]
 
     for selector in selectors:
@@ -348,28 +386,25 @@ def parse_coupon(soup: BeautifulSoup) -> tuple[bool, str]:
         "#couponText",
         ".couponLabelText",
         ".couponBadge",
-        ".promoPriceBlockMessage",
         "#vpcButton",
-        "[id*='coupon']",
-        "[class*='coupon']",
+        "#couponFeature",
+        "#coupon_feature_div",
+        "#promoPriceBlockMessage_feature_div [id*='coupon']",
+        "[data-csa-c-slot-id*='coupon']",
     ]
 
     for selector in selectors:
         for element in soup.select(selector):
             text = " ".join(element.get_text(" ", strip=True).split())
-            if text and any(word in text.casefold() for word in ["kupon", "indirim", "tasarruf"]):
+            lower = text.casefold()
+            if not text or "kupon" not in lower:
+                continue
+
+            if any(skip in lower for skip in ["prime", "banner", "çok al az öde", "cok al az ode"]):
+                continue
+
+            if re.search(r"(kupon|kuponu).{0,120}?(tl|%)|(?:tl|%).{0,120}?(kupon|kuponu)", text, re.I):
                 candidates.append(text)
-
-    body_text = " ".join(soup.get_text(" ", strip=True).split())
-    coupon_patterns = [
-        r"(?:% ?\d{1,2}|\d{1,5}(?:[.,]\d{1,2})? ?TL).{0,80}?(?:kupon|indirim|tasarruf)",
-        r"(?:kupon|indirim kuponu|tasarruf).{0,80}?(?:% ?\d{1,2}|\d{1,5}(?:[.,]\d{1,2})? ?TL)",
-    ]
-
-    for pattern in coupon_patterns:
-        match = re.search(pattern, body_text, re.I)
-        if match:
-            candidates.append(match.group(0))
 
     if not candidates:
         return False, ""

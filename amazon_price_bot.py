@@ -1,707 +1,603 @@
-# =========================================
-# AMAZON TELEGRAM PRICE BOT
-# PROFESSIONAL VERSION
-# AUTO CLEAN AMAZON LINKS
-# =========================================
-
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+import asyncio
 import json
+import logging
 import os
+import random
 import re
 import time
-import threading
-import os
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+import requests
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from flask import Flask
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
 
 load_dotenv()
-TOKEN = os.getenv("BOT_TOKEN")
 
-from bs4 import BeautifulSoup
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "10"))
+DATA_FILE = Path(os.getenv("DATA_FILE", "products.json"))
+HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "20"))
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
+AMAZON_HOSTS = {"amazon.com.tr", "www.amazon.com.tr"}
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+]
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes
-)
+logger = logging.getLogger("amazon-price-bot")
 
 
-# =========================================
-# TOKEN
-# =========================================
+@dataclass
+class ProductInfo:
+    title: str
+    price: Decimal | None
+    seller_ok: bool
+    seller_text: str
+    coupon_exists: bool
+    coupon_text: str
+    in_stock: bool
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# =========================================
-# SETTINGS
-# =========================================
-
-CHECK_INTERVAL = 10
-
-DATA_FILE = "products.json"
-
-# =========================================
-# LOAD / SAVE
-# =========================================
-
-def load_data():
-
-    if not os.path.exists(DATA_FILE):
+def load_data() -> dict[str, list[dict[str, Any]]]:
+    if not DATA_FILE.exists():
         return {}
 
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with DATA_FILE.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (json.JSONDecodeError, OSError):
+        logger.exception("Could not read %s", DATA_FILE)
+        return {}
 
-def save_data(data):
+    if not isinstance(data, dict):
+        return {}
 
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(
-            data,
-            f,
-            indent=4,
-            ensure_ascii=False
-        )
+    return data
+
+
+def save_data(data: dict[str, list[dict[str, Any]]]) -> None:
+    temp_file = DATA_FILE.with_suffix(DATA_FILE.suffix + ".tmp")
+    with temp_file.open("w", encoding="utf-8") as file:
+        json.dump(data, file, indent=4, ensure_ascii=False)
+    temp_file.replace(DATA_FILE)
+
 
 products = load_data()
+data_lock = asyncio.Lock()
 
-# =========================================
-# AMAZON LINK CLEANER
-# =========================================
 
-def clean_amazon_url(url):
+def clean_amazon_url(url: str) -> str:
+    url = url.strip()
+    parsed = urlparse(url if "://" in url else f"https://{url}")
 
-    patterns = [
+    if parsed.netloc.lower() not in AMAZON_HOSTS:
+        raise ValueError("Sadece amazon.com.tr ürün linkleri desteklenir.")
 
-        r"/dp/([A-Z0-9]{10})",
+    match = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", parsed.path, re.I)
+    if not match:
+        raise ValueError("Link içinde geçerli bir Amazon ASIN kodu bulunamadı.")
 
-        r"/gp/product/([A-Z0-9]{10})"
-    ]
+    return f"https://www.amazon.com.tr/dp/{match.group(1).upper()}"
 
-    for pattern in patterns:
 
-        match = re.search(
-            pattern,
-            url
-        )
+def money_to_decimal(value: str) -> Decimal | None:
+    value = value.replace("\xa0", " ").strip()
+    value = re.sub(r"[^\d,\.]", "", value)
 
-        if match:
+    if not value:
+        return None
 
-            asin = match.group(1)
-
-            return f"https://www.amazon.com.tr/dp/{asin}"
-
-    return url.split("?")[0]
-
-# =========================================
-# PRICE PARSER
-# =========================================
-
-def parse_price(text):
-
-    text = text.replace(".", "")
-    text = text.replace(",", ".")
-
-    nums = re.findall(
-        r"\d+\.\d+|\d+",
-        text
-    )
-
-    if nums:
-        return float(nums[0])
-
-    return None
-
-# =========================================
-# PRODUCT SCRAPER
-# =========================================
-
-def get_product_info(url):
+    if "," in value:
+        value = value.replace(".", "").replace(",", ".")
+    else:
+        parts = value.split(".")
+        if len(parts) > 2:
+            value = "".join(parts)
 
     try:
-
-        options = Options()
-        
-        options.add_argument("--headless")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-
-        options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-        )
-
-        driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()),
-            options=options,            
-        )
-
-        driver.get(url)
-
-        time.sleep(8)
-
-        html = driver.page_source
-
-        driver.quit()
-
-        soup = BeautifulSoup(
-            html,
-            "html.parser"
-        )
-
-        title = ""
-
-        title_el = soup.select_one(
-            "#productTitle"
-        )
-
-        if title_el:
-            title = title_el.text.strip()
-
-        price = None
-
-        selectors = [
-
-            ".a-price .a-offscreen",
-
-            "#priceblock_ourprice",
-
-            "#priceblock_dealprice",
-
-            ".a-price-whole"
-        ]
-
-        for selector in selectors:
-
-            el = soup.select_one(selector)
-
-            if el:
-
-                price = parse_price(
-                    el.text
-                )
-
-                if price:
-                    break
-
-        if not title:
-            return None
-
-        return {
-
-            "title": title,
-
-            "price": price,
-
-            "seller_ok": True,
-
-            "coupon_exists": False,
-
-            "coupon_text": "",
-
-            "in_stock": True
-        }
-
-    except Exception as e:
-
-        print("SCRAPER ERROR:", e)
-
+        return Decimal(value)
+    except InvalidOperation:
         return None
 
 
-# =========================================
-# TELEGRAM COMMANDS
-# =========================================
+def parse_percent(value: str) -> Decimal:
+    return Decimal(value.strip().replace("%", "").replace(",", "."))
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
 
-    text = """
-🤖 AMAZON FİYAT TAKİP BOTU
+def first_text(soup: BeautifulSoup, selectors: list[str]) -> str:
+    for selector in selectors:
+        element = soup.select_one(selector)
+        if element:
+            text = " ".join(element.get_text(" ", strip=True).split())
+            if text:
+                return text
+    return ""
 
-Komutlar:
 
-/add URL YUZDE
-/remove URL
-/list
-/check
-
-Örnek:
-
-/add https://www.amazon.com.tr/dp/B0BJQP23Y8 15
-"""
-
-    await update.message.reply_text(text)
-
-# =========================================
-
-async def add_product(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    chat_id = str(
-        update.effective_chat.id
-    )
-
-    if len(context.args) < 2:
-
-        await update.message.reply_text(
-            "Kullanım:\n/add URL YUZDE"
-        )
-
-        return
-
-    raw_url = context.args[0]
-
-    url = clean_amazon_url(
-        raw_url
-    )
-
-    try:
-
-        drop_percent = float(
-            context.args[1]
-        )
-
-    except:
-
-        await update.message.reply_text(
-            "Yüzde hatalı."
-        )
-
-        return
-
-    info = get_product_info(url)
-
-    if not info:
-
-        await update.message.reply_text(
-            "❌ Ürün okunamadı."
-        )
-
-        return
-
-    if not info["price"]:
-
-        await update.message.reply_text(
-            "❌ Fiyat okunamadı."
-        )
-
-        return
-
-    if chat_id not in products:
-        products[chat_id] = []
-
-    for p in products[chat_id]:
-
-        if p["url"] == url:
-
-            await update.message.reply_text(
-                "⚠️ Ürün zaten ekli."
-            )
-
-            return
-
-    products[chat_id].append({
-
-        "url": url,
-
-        "title": info["title"],
-
-        "base_price": info["price"],
-
-        "last_price": info["price"],
-
-        "drop_percent": drop_percent,
-
-        "coupon_notified": False,
-
-        "stock_notified": False
-    })
-
-    save_data(products)
-
-    await update.message.reply_text(
-        f"""
-✅ Ürün Eklendi
-
-📦 {info['title']}
-
-💰 {info['price']} TL
-
-🎯 %{drop_percent} düşüş bildirimi aktif
-
-🔗 {url}
-"""
-    )
-
-# =========================================
-
-async def remove_product(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    chat_id = str(
-        update.effective_chat.id
-    )
-
-    if len(context.args) < 1:
-
-        await update.message.reply_text(
-            "Kullanım:\n/remove URL"
-        )
-
-        return
-
-    url = clean_amazon_url(
-        context.args[0]
-    )
-
-    if chat_id not in products:
-
-        await update.message.reply_text(
-            "Liste boş."
-        )
-
-        return
-
-    before = len(
-        products[chat_id]
-    )
-
-    products[chat_id] = [
-
-        p for p in products[chat_id]
-
-        if p["url"] != url
+def parse_price(soup: BeautifulSoup) -> Decimal | None:
+    selectors = [
+        "#corePrice_feature_div .a-price .a-offscreen",
+        "#apex_desktop .a-price .a-offscreen",
+        "#priceblock_dealprice",
+        "#priceblock_ourprice",
+        "#price_inside_buybox",
+        ".a-price .a-offscreen",
     ]
 
-    after = len(
-        products[chat_id]
-    )
+    for selector in selectors:
+        for element in soup.select(selector):
+            price = money_to_decimal(element.get_text(" ", strip=True))
+            if price and price > 0:
+                return price
 
-    save_data(products)
+    body_text = soup.get_text(" ", strip=True)
+    match = re.search(r"(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)\s*TL", body_text)
+    return money_to_decimal(match.group(1)) if match else None
 
-    if before == after:
 
-        await update.message.reply_text(
-            "Ürün bulunamadı."
-        )
+def parse_seller(soup: BeautifulSoup) -> tuple[bool, str]:
+    seller_link = first_text(soup, ["#sellerProfileTriggerId"])
+    if seller_link and "amazon.com.tr" in seller_link.casefold():
+        return True, seller_link
 
-    else:
+    selectors = [
+        "#merchant-info",
+        "#tabular-buybox-container",
+        "#buybox",
+        "#shipsFromSoldByMessage_feature_div",
+    ]
+    seller_text = first_text(soup, selectors)
+    compact = seller_text.casefold()
 
-        await update.message.reply_text(
-            "✅ Ürün silindi."
-        )
+    amazon_markers = [
+        "amazon.com.tr tarafından satılır",
+        "amazon.com.tr tarafindan satilir",
+        "satıcı amazon.com.tr",
+        "satici amazon.com.tr",
+        "amazon.com.tr satıcısından",
+        "amazon.com.tr saticisindan",
+    ]
+    seller_is_amazon = any(marker in compact for marker in amazon_markers)
+    return seller_is_amazon, seller_text or seller_link
 
-# =========================================
 
-async def list_products(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+def parse_stock(soup: BeautifulSoup) -> bool:
+    availability = first_text(soup, ["#availability", "#outOfStock"])
+    text = availability.casefold()
 
-    chat_id = str(
-        update.effective_chat.id
-    )
+    if any(marker in text for marker in ["stokta yok", "mevcut değil", "şu anda mevcut değil"]):
+        return False
 
-    if (
-        chat_id not in products
-        or
-        not products[chat_id]
-    ):
+    return True
 
-        await update.message.reply_text(
-            "Liste boş."
-        )
 
-        return
-
-    msg = "📋 TAKİP EDİLEN ÜRÜNLER\n\n"
-
-    for i, p in enumerate(
-        products[chat_id],
-        start=1
-    ):
-
-        msg += (
-            f"{i}. {p['title']}\n"
-            f"💰 {p['base_price']} TL\n"
-            f"🎯 %{p['drop_percent']}\n"
-            f"{p['url']}\n\n"
-        )
-
-    await update.message.reply_text(msg)
-
-# =========================================
-
-async def check_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await update.message.reply_text(
-        "✅ Bot çalışıyor."
-    )
-
-# =========================================
-# PRICE DROP
-# =========================================
-
-def calculate_drop(
-    old_price,
-    new_price
-):
-
-    return (
-        (
-            old_price - new_price
-        ) / old_price
-    ) * 100
-
-# =========================================
-# TELEGRAM SEND
-# =========================================
-
-async def notify(
-    app,
-    chat_id,
-    text,
-    url
-):
-
-    keyboard = [
-
-        [
-            InlineKeyboardButton(
-                "🛒 Amazon'da Aç",
-                url=url
-            )
-        ]
+def parse_coupon(soup: BeautifulSoup) -> tuple[bool, str]:
+    candidates: list[str] = []
+    selectors = [
+        "#couponText",
+        ".couponLabelText",
+        ".couponBadge",
+        ".promoPriceBlockMessage",
+        "#vpcButton",
+        "[id*='coupon']",
+        "[class*='coupon']",
     ]
 
-    reply_markup = InlineKeyboardMarkup(
-        keyboard
+    for selector in selectors:
+        for element in soup.select(selector):
+            text = " ".join(element.get_text(" ", strip=True).split())
+            if text and any(word in text.casefold() for word in ["kupon", "indirim", "tasarruf"]):
+                candidates.append(text)
+
+    body_text = " ".join(soup.get_text(" ", strip=True).split())
+    coupon_patterns = [
+        r"(?:% ?\d{1,2}|\d{1,5}(?:[.,]\d{1,2})? ?TL).{0,80}?(?:kupon|indirim|tasarruf)",
+        r"(?:kupon|indirim kuponu|tasarruf).{0,80}?(?:% ?\d{1,2}|\d{1,5}(?:[.,]\d{1,2})? ?TL)",
+    ]
+
+    for pattern in coupon_patterns:
+        match = re.search(pattern, body_text, re.I)
+        if match:
+            candidates.append(match.group(0))
+
+    if not candidates:
+        return False, ""
+
+    coupon_text = min(candidates, key=len)
+    return True, coupon_text[:240]
+
+
+def fetch_product_info(url: str) -> ProductInfo | None:
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.7,en;q=0.6",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "User-Agent": random.choice(USER_AGENTS),
+    }
+
+    response = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    title = first_text(soup, ["#productTitle", "span#title", "h1"])
+
+    if not title:
+        page_text = soup.get_text(" ", strip=True).casefold()
+        if "captcha" in page_text or "robot" in page_text:
+            raise RuntimeError("Amazon bot doğrulama sayfası döndürdü.")
+        return None
+
+    seller_ok, seller_text = parse_seller(soup)
+    coupon_exists, coupon_text = parse_coupon(soup)
+
+    return ProductInfo(
+        title=title,
+        price=parse_price(soup),
+        seller_ok=seller_ok,
+        seller_text=seller_text,
+        coupon_exists=coupon_exists,
+        coupon_text=coupon_text,
+        in_stock=parse_stock(soup),
     )
 
+
+def format_money(value: Decimal | str | float | int | None) -> str:
+    if value is None:
+        return "?"
+    decimal = Decimal(str(value))
+    return f"{decimal:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def calculate_drop(old_price: Decimal, new_price: Decimal) -> Decimal:
+    if old_price <= 0:
+        return Decimal("0")
+    return ((old_price - new_price) / old_price) * Decimal("100")
+
+
+def product_label(product: dict[str, Any]) -> str:
+    title = product.get("title") or product.get("url", "Ürün")
+    return title if len(title) <= 90 else f"{title[:87]}..."
+
+
+async def scrape(url: str) -> ProductInfo | None:
+    return await asyncio.to_thread(fetch_product_info, url)
+
+
+async def notify(app: Application, chat_id: str, text: str, url: str) -> None:
+    keyboard = [[InlineKeyboardButton("Amazon'da aç", url=url)]]
     await app.bot.send_message(
         chat_id=int(chat_id),
         text=text,
-        reply_markup=reply_markup
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        disable_web_page_preview=True,
     )
 
-# =========================================
-# BACKGROUND CHECKER
-# =========================================
 
-def background_checker(app):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "Amazon.com.tr fiyat takip botu hazır.\n\n"
+        "Komutlar:\n"
+        "/add LINK YUZDE - Ürün ekler\n"
+        "/remove LINK veya SIRA_NO - Ürün siler\n"
+        "/setdrop LINK veya SIRA_NO YUZDE - Bildirim yüzdesini değiştirir\n"
+        "/list - Takip listesini gösterir\n"
+        "/check - Elle kontrol başlatır\n\n"
+        "Örnek:\n"
+        "/add https://www.amazon.com.tr/dp/B0BJQP23Y8 15"
+    )
 
-    import asyncio
 
-    loop = asyncio.new_event_loop()
+async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
 
-    asyncio.set_event_loop(loop)
+    if len(context.args) < 2:
+        await update.message.reply_text("Kullanım: /add LINK YUZDE")
+        return
 
+    try:
+        url = clean_amazon_url(context.args[0])
+        drop_percent = parse_percent(context.args[1])
+    except (ValueError, InvalidOperation) as exc:
+        await update.message.reply_text(str(exc) if str(exc) else "Yüzde değeri hatalı.")
+        return
+
+    if drop_percent <= 0:
+        await update.message.reply_text("Yüzde değeri 0'dan büyük olmalı.")
+        return
+
+    await update.message.reply_text("Ürünü okuyorum, birkaç saniye sürebilir...")
+
+    try:
+        info = await scrape(url)
+    except Exception as exc:
+        logger.exception("Scrape failed for %s", url)
+        await update.message.reply_text(f"Ürün okunamadı: {exc}")
+        return
+
+    if not info or not info.price:
+        await update.message.reply_text("Ürün veya fiyat okunamadı.")
+        return
+
+    if not info.seller_ok:
+        seller = f"\nSatıcı bilgisi: {info.seller_text}" if info.seller_text else ""
+        await update.message.reply_text(
+            "Bu ürünün satıcısı amazon.com.tr görünmüyor, takip listesine eklemedim."
+            f"{seller}"
+        )
+        return
+
+    async with data_lock:
+        chat_products = products.setdefault(chat_id, [])
+        if any(item.get("url") == url for item in chat_products):
+            await update.message.reply_text("Bu ürün zaten takip listende.")
+            return
+
+        chat_products.append(
+            {
+                "url": url,
+                "title": info.title,
+                "base_price": str(info.price),
+                "last_price": str(info.price),
+                "drop_percent": str(drop_percent),
+                "coupon_notified": info.coupon_exists,
+                "last_coupon_text": info.coupon_text,
+                "last_error": "",
+                "created_at": int(time.time()),
+            }
+        )
+        save_data(products)
+
+    coupon_line = f"Kupon: {info.coupon_text}" if info.coupon_exists else "Kupon yok"
+    await update.message.reply_text(
+        "Ürün eklendi.\n\n"
+        f"{info.title}\n"
+        f"Fiyat: {format_money(info.price)} TL\n"
+        f"{coupon_line}\n"
+        f"Bildirim eşiği: %{drop_percent}\n"
+        f"{url}"
+    )
+
+
+def find_product(chat_products: list[dict[str, Any]], key: str) -> tuple[int, dict[str, Any]] | None:
+    if key.isdigit():
+        index = int(key) - 1
+        if 0 <= index < len(chat_products):
+            return index, chat_products[index]
+        return None
+
+    try:
+        url = clean_amazon_url(key)
+    except ValueError:
+        return None
+
+    for index, product in enumerate(chat_products):
+        if product.get("url") == url:
+            return index, product
+    return None
+
+
+async def remove_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+
+    if not context.args:
+        await update.message.reply_text("Kullanım: /remove LINK veya SIRA_NO")
+        return
+
+    async with data_lock:
+        chat_products = products.get(chat_id, [])
+        found = find_product(chat_products, context.args[0])
+        if not found:
+            await update.message.reply_text("Ürün bulunamadı.")
+            return
+
+        index, removed = found
+        del chat_products[index]
+        save_data(products)
+
+    await update.message.reply_text(f"Ürün silindi: {product_label(removed)}")
+
+
+async def set_drop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+
+    if len(context.args) < 2:
+        await update.message.reply_text("Kullanım: /setdrop LINK veya SIRA_NO YUZDE")
+        return
+
+    try:
+        drop_percent = parse_percent(context.args[1])
+    except InvalidOperation:
+        await update.message.reply_text("Yüzde değeri hatalı.")
+        return
+
+    if drop_percent <= 0:
+        await update.message.reply_text("Yüzde değeri 0'dan büyük olmalı.")
+        return
+
+    async with data_lock:
+        chat_products = products.get(chat_id, [])
+        found = find_product(chat_products, context.args[0])
+        if not found:
+            await update.message.reply_text("Ürün bulunamadı.")
+            return
+
+        _, product = found
+        product["drop_percent"] = str(drop_percent)
+        save_data(products)
+
+    await update.message.reply_text(f"Bildirim eşiği güncellendi: %{drop_percent}")
+
+
+async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    chat_products = products.get(chat_id, [])
+
+    if not chat_products:
+        await update.message.reply_text("Takip listen boş.")
+        return
+
+    lines = ["Takip edilen ürünler:\n"]
+    for index, product in enumerate(chat_products, start=1):
+        lines.extend(
+            [
+                f"{index}. {product_label(product)}",
+                f"Fiyat: {format_money(product.get('last_price'))} TL",
+                f"Eşik: %{product.get('drop_percent')}",
+                product.get("url", ""),
+                "",
+            ]
+        )
+
+    await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
+
+
+async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("Elle kontrol başlatıldı.")
+    await check_all_products(context.application, manual_chat_id=str(update.effective_chat.id))
+    await update.message.reply_text("Kontrol tamamlandı.")
+
+
+async def check_product(app: Application, chat_id: str, product: dict[str, Any]) -> None:
+    url = product.get("url", "")
+
+    try:
+        info = await scrape(url)
+    except Exception as exc:
+        product["last_error"] = str(exc)
+        logger.warning("Check failed for %s: %s", url, exc)
+        return
+
+    if not info:
+        product["last_error"] = "Ürün okunamadı."
+        return
+
+    product["title"] = info.title
+    product["last_error"] = ""
+
+    if not info.seller_ok:
+        product["seller_ok"] = False
+        return
+
+    product["seller_ok"] = True
+
+    if not info.price:
+        return
+
+    old_price = Decimal(str(product.get("base_price") or product.get("last_price") or info.price))
+    current_price = info.price
+    drop_percent = Decimal(str(product.get("drop_percent", "0")))
+    drop = calculate_drop(old_price, current_price)
+
+    if drop >= drop_percent:
+        await notify(
+            app,
+            chat_id,
+            "Fiyat düştü.\n\n"
+            f"{info.title}\n"
+            f"Eski fiyat: {format_money(old_price)} TL\n"
+            f"Yeni fiyat: {format_money(current_price)} TL\n"
+            f"Düşüş: %{drop:.2f}",
+            url,
+        )
+        product["base_price"] = str(current_price)
+
+    last_coupon_text = product.get("last_coupon_text", "")
+    if info.coupon_exists and info.coupon_text != last_coupon_text:
+        await notify(
+            app,
+            chat_id,
+            "Kupon bulundu.\n\n"
+            f"{info.title}\n"
+            f"{info.coupon_text}",
+            url,
+        )
+        product["coupon_notified"] = True
+        product["last_coupon_text"] = info.coupon_text
+
+    if not info.coupon_exists:
+        product["coupon_notified"] = False
+        product["last_coupon_text"] = ""
+
+    product["last_price"] = str(current_price)
+    product["in_stock"] = info.in_stock
+
+
+async def check_all_products(app: Application, manual_chat_id: str | None = None) -> None:
+    async with data_lock:
+        chat_ids = [manual_chat_id] if manual_chat_id else list(products.keys())
+        targets = [
+            (chat_id, product)
+            for chat_id in chat_ids
+            for product in products.get(chat_id, [])
+        ]
+
+    changed = False
+    for chat_id, product in targets:
+        await check_product(app, chat_id, product)
+        changed = True
+
+    if changed:
+        async with data_lock:
+            save_data(products)
+
+
+async def background_checker(app: Application) -> None:
     while True:
+        await check_all_products(app)
+        await asyncio.sleep(CHECK_INTERVAL)
 
-        try:
 
-            for chat_id in list(products.keys()):
+async def post_init(app: Application) -> None:
+    app.create_task(background_checker(app))
+    logger.info("Background checker started. Interval: %s seconds", CHECK_INTERVAL)
 
-                for product in products[chat_id]:
 
-                    info = get_product_info(
-                        product["url"]
-                    )
+app_web = Flask(__name__)
 
-                    if not info:
-                        continue
 
-                    if not info["seller_ok"]:
-                        continue
+@app_web.route("/")
+def home() -> str:
+    return "Amazon fiyat takip botu çalışıyor"
 
-                    current_price = info["price"]
 
-                    if not current_price:
-                        continue
+def run_web() -> None:
+    port = int(os.getenv("PORT", "8000"))
+    app_web.run(host="0.0.0.0", port=port)
 
-                    drop = calculate_drop(
-                        product["base_price"],
-                        current_price
-                    )
 
-                    # PRICE DROP
+def main() -> None:
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN ortam değişkeni tanımlı değil.")
 
-                    if (
-                        drop >=
-                        product["drop_percent"]
-                    ):
+    from threading import Thread
 
-                        text = f"""
-🔥 FİYAT DÜŞTÜ
+    Thread(target=run_web, daemon=True).start()
 
-📦 {info['title']}
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+    app.add_handler(CommandHandler(["start", "help"], start))
+    app.add_handler(CommandHandler("add", add_product))
+    app.add_handler(CommandHandler("remove", remove_product))
+    app.add_handler(CommandHandler("setdrop", set_drop))
+    app.add_handler(CommandHandler("list", list_products))
+    app.add_handler(CommandHandler("check", check_command))
 
-💰 Eski:
-{product['base_price']} TL
-
-💸 Yeni:
-{current_price} TL
-
-📉 %{drop:.2f} düşüş
-"""
-
-                        loop.run_until_complete(
-                            notify(
-                                app,
-                                chat_id,
-                                text,
-                                product["url"]
-                            )
-                        )
-
-                        product["base_price"] = current_price
-
-                    # COUPON
-
-                    if (
-                        info["coupon_exists"]
-                        and
-                        not product["coupon_notified"]
-                    ):
-
-                        text = f"""
-🎟 KUPON BULUNDU
-
-📦 {info['title']}
-
-🧾 {info['coupon_text']}
-"""
-
-                        loop.run_until_complete(
-                            notify(
-                                app,
-                                chat_id,
-                                text,
-                                product["url"]
-                            )
-                        )
-
-                        product["coupon_notified"] = True
-
-                    if not info["coupon_exists"]:
-
-                        product["coupon_notified"] = False
-
-                    # STOCK
-
-                    if (
-                        info["in_stock"]
-                        and
-                        not product["stock_notified"]
-                    ):
-
-                        text = f"""
-📦 ÜRÜN STOKTA
-
-📦 {info['title']}
-"""
-
-                        loop.run_until_complete(
-                            notify(
-                                app,
-                                chat_id,
-                                text,
-                                product["url"]
-                            )
-                        )
-
-                        product["stock_notified"] = True
-
-                    if not info["in_stock"]:
-
-                        product["stock_notified"] = False
-
-                    product["last_price"] = current_price
-
-                    save_data(products)
-
-        except Exception as e:
-
-            print("CHECK ERROR:", e)
-
-        time.sleep(CHECK_INTERVAL)
-
-# =========================================
-# MAIN
-# =========================================
-
-def main():
-
-    app = ApplicationBuilder().token(
-        BOT_TOKEN
-    ).build()
-
-    app.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
-    )
-
-    app.add_handler(
-        CommandHandler(
-            "add",
-            add_product
-        )
-    )
-
-    app.add_handler(
-        CommandHandler(
-            "remove",
-            remove_product
-        )
-    )
-
-    app.add_handler(
-        CommandHandler(
-            "list",
-            list_products
-        )
-    )
-
-    app.add_handler(
-        CommandHandler(
-            "check",
-            check_command
-        )
-    )
-
-    checker_thread = threading.Thread(
-        target=background_checker,
-        args=(app,),
-        daemon=True
-    )
-
-    checker_thread.start()
-
-    print("🤖 BOT STARTED")
-
+    logger.info("Telegram bot started.")
     app.run_polling()
 
-# =========================================
 
 if __name__ == "__main__":
     main()
-

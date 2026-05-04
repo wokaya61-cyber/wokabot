@@ -1,7 +1,5 @@
 python-telegram-bot==20.7
 beautifulsoup4
 requests
-selenium
-webdriver-manager
 python-dotenv
 flask

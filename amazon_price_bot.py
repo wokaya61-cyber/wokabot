@@ -267,15 +267,36 @@ def parse_price_from_scripts(soup: BeautifulSoup, html: str) -> Decimal | None:
 
 
 def price_from_container(container: Any) -> Decimal | None:
-    offscreen = container.select_one(".a-price .a-offscreen, .a-offscreen")
-    if offscreen:
+    old_price_markers = [
+        "a-text-price",
+        "basisPrice",
+        "listPrice",
+        "wasPrice",
+        "savingsPercentage",
+        "previous",
+        "strike",
+    ]
+
+    def is_old_price_element(element: Any) -> bool:
+        for parent in [element, *element.parents]:
+            parent_id = str(parent.get("id", ""))
+            parent_class = " ".join(parent.get("class", []))
+            marker_text = f"{parent_id} {parent_class}"
+            if any(marker.casefold() in marker_text.casefold() for marker in old_price_markers):
+                return True
+        return False
+
+    for offscreen in container.select(".a-price .a-offscreen, .a-offscreen"):
+        if is_old_price_element(offscreen):
+            continue
+
         price = money_to_decimal(offscreen.get_text(" ", strip=True))
         if price and price > 0:
             return price
 
     whole = container.select_one(".a-price-whole")
     fraction = container.select_one(".a-price-fraction")
-    if whole:
+    if whole and not is_old_price_element(whole):
         whole_text = whole.get_text("", strip=True)
         fraction_text = fraction.get_text("", strip=True) if fraction else "00"
         price = money_to_decimal(f"{whole_text},{fraction_text}")
@@ -339,9 +360,7 @@ def parse_price(soup: BeautifulSoup, html: str = "") -> Decimal | None:
     if script_price:
         return script_price
 
-    body_text = soup.get_text(" ", strip=True)
-    match = re.search(r"(\d{1,3}(?:\.\d{3})*(?:,\d{2})?)\s*TL", body_text)
-    return money_to_decimal(match.group(1)) if match else None
+    return None
 
 
 def parse_seller(soup: BeautifulSoup) -> tuple[bool, str]:
@@ -365,8 +384,16 @@ def parse_seller(soup: BeautifulSoup) -> tuple[bool, str]:
         "satici amazon.com.tr",
         "amazon.com.tr satıcısından",
         "amazon.com.tr saticisindan",
+        "satıcı amazon.com.tr iadeler",
+        "satici amazon.com.tr iadeler",
+        "gönderici amazon.com.tr",
+        "gonderici amazon.com.tr",
     ]
     seller_is_amazon = any(marker in compact for marker in amazon_markers)
+    seller_is_amazon = seller_is_amazon or (
+        "amazon.com.tr" in compact
+        and any(word in compact for word in ["satıcı", "satici", "gönderici", "gonderici"])
+    )
     return seller_is_amazon, seller_text or seller_link
 
 
@@ -842,6 +869,10 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
     if not info.seller_ok:
         product["seller_ok"] = False
         if product.get("pending_initial_price"):
+            if not info.seller_text:
+                set_backoff(product, "seller_missing")
+                return
+
             product["disabled"] = True
             product["last_error"] = "Satıcı amazon.com.tr değil"
             await notify(

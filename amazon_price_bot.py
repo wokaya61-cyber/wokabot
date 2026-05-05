@@ -33,6 +33,9 @@ CAPTCHA_BACKOFF_SECONDS = int(os.getenv("CAPTCHA_BACKOFF_SECONDS", "30"))
 MAX_BACKOFF_SECONDS = int(os.getenv("MAX_BACKOFF_SECONDS", "60"))
 MAX_CONCURRENT_CHECKS = int(os.getenv("MAX_CONCURRENT_CHECKS", "3"))
 MAX_CHECKS_PER_CYCLE = int(os.getenv("MAX_CHECKS_PER_CYCLE", "50"))
+CART_QUANTITY_PROBE_MIN_PAGE_QTY = int(os.getenv("CART_QUANTITY_PROBE_MIN_PAGE_QTY", "5"))
+CART_QUANTITY_PROBE_QTY = int(os.getenv("CART_QUANTITY_PROBE_QTY", "999"))
+CART_QUANTITY_PROBE_TTL_SECONDS = int(os.getenv("CART_QUANTITY_PROBE_TTL_SECONDS", "86400"))
 
 AMAZON_HOSTS = {"amazon.com.tr", "www.amazon.com.tr"}
 RETRY_HTTP_STATUSES = {500, 502, 504}
@@ -495,6 +498,96 @@ def parse_max_quantity(soup: BeautifulSoup, html: str = "") -> int | None:
     return None
 
 
+def form_payload(form: Any) -> dict[str, str]:
+    payload: dict[str, str] = {}
+    for field in form.select("input, select, textarea"):
+        name = field.get("name")
+        if not name:
+            continue
+
+        if field.name == "select":
+            selected = field.select_one("option[selected]")
+            option = selected or field.select_one("option")
+            payload[name] = option.get("value", "") if option else ""
+            continue
+
+        field_type = str(field.get("type", "")).casefold()
+        if field_type in {"checkbox", "radio"} and not field.get("checked"):
+            continue
+
+        payload[name] = str(field.get("value", ""))
+
+    return payload
+
+
+def parse_cart_quantity(html: str) -> int | None:
+    soup = BeautifulSoup(html, "html.parser")
+    quantities: list[int] = []
+
+    for selector in [
+        "input[name='quantityBox']",
+        "input[name='quantity']",
+        "select[name='quantity'] option[selected]",
+        "[data-a-selector='value']",
+        ".sc-action-quantity input",
+    ]:
+        for element in soup.select(selector):
+            value = element.get("value") or element.get_text(" ", strip=True)
+            match = re.search(r"\d{1,4}", str(value))
+            if match:
+                quantities.append(int(match.group(0)))
+
+    text = " ".join(soup.get_text(" ", strip=True).split())
+    text_patterns = [
+        r"Ara toplam\s*\((\d{1,4})\s*ürün",
+        r"Alt toplam\s*\((\d{1,4})\s*ürün",
+        r"Sepet(?:iniz)?de\s*(\d{1,4})\s*ürün",
+        r"Mktr:\s*(\d{1,4})",
+        r"Adet:\s*(\d{1,4})",
+    ]
+
+    for pattern in text_patterns:
+        for match in re.finditer(pattern, text, re.I):
+            quantities.append(int(match.group(1)))
+
+    return max(quantities) if quantities else None
+
+
+def probe_cart_max_quantity(url: str) -> int | None:
+    headers = build_headers(random.choice(USER_AGENTS))
+    session = requests.Session()
+
+    html = fetch_html(url, headers)
+    soup = BeautifulSoup(html, "html.parser")
+    form = soup.select_one("form#addToCart, form[action*='handle-buy-box'], form[action*='add-to-cart']")
+    if not form:
+        return None
+
+    action = form.get("action") or "/gp/product/handle-buy-box"
+    if action.startswith("/"):
+        action = f"https://www.amazon.com.tr{action}"
+
+    payload = form_payload(form)
+    payload["quantity"] = str(CART_QUANTITY_PROBE_QTY)
+
+    response = session.post(action, headers=headers, data=payload, timeout=HTTP_TIMEOUT, allow_redirects=True)
+    if response.status_code in BLOCK_HTTP_STATUSES:
+        raise AmazonBlockedError(f"Sepet testi geçici blok döndürdü: HTTP {response.status_code}")
+
+    response.raise_for_status()
+    quantity = parse_cart_quantity(response.text)
+    if quantity:
+        return quantity
+
+    cart_response = session.get("https://www.amazon.com.tr/gp/cart/view.html", headers=headers, timeout=HTTP_TIMEOUT)
+    cart_response.raise_for_status()
+    return parse_cart_quantity(cart_response.text)
+
+
+def should_probe_cart_quantity(page_quantity: int | None) -> bool:
+    return bool(page_quantity and page_quantity >= CART_QUANTITY_PROBE_MIN_PAGE_QTY)
+
+
 def normalize_promo_text(text: str) -> str:
     replacements = str.maketrans(
         {
@@ -723,10 +816,46 @@ def format_money(value: Decimal | str | float | int | None) -> str:
     return f"{decimal:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-def max_quantity_line(info: ProductInfo) -> str:
+def max_quantity_line(info: ProductInfo, cart_max_quantity: int | None = None) -> str:
+    if cart_max_quantity:
+        if info.max_quantity and cart_max_quantity > info.max_quantity:
+            return f"🛒 Sepet maksimum adedi: {cart_max_quantity} (sayfada {info.max_quantity})"
+        return f"🛒 Sepet maksimum adedi: {cart_max_quantity}"
+
     if info.max_quantity:
-        return f"🛒 Maksimum adet: {info.max_quantity}"
+        return f"🛒 Sayfa maksimum adedi: {info.max_quantity}"
+
     return "🛒 Maksimum adet: okunamadı"
+
+
+async def get_cart_max_quantity(url: str, info: ProductInfo) -> int | None:
+    if not should_probe_cart_quantity(info.max_quantity):
+        return None
+
+    try:
+        return await asyncio.to_thread(probe_cart_max_quantity, url)
+    except Exception as exc:
+        logger.warning("Cart quantity probe failed for %s: %s", url, exc)
+        return None
+
+
+async def get_cached_or_probe_cart_quantity(
+    product: dict[str, Any],
+    url: str,
+    info: ProductInfo,
+) -> int | None:
+    cached_quantity = product.get("cart_max_quantity")
+    checked_at = int(product.get("cart_max_checked_at", 0) or 0)
+
+    if cached_quantity and checked_at and now_ts() - checked_at < CART_QUANTITY_PROBE_TTL_SECONDS:
+        return int(cached_quantity)
+
+    cart_quantity = await get_cart_max_quantity(url, info)
+    if cart_quantity:
+        product["cart_max_quantity"] = cart_quantity
+        product["cart_max_checked_at"] = now_ts()
+
+    return cart_quantity
 
 
 def calculate_drop(old_price: Decimal, new_price: Decimal) -> Decimal:
@@ -893,6 +1022,8 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
+    cart_max_quantity = await get_cart_max_quantity(url, info)
+
     async with data_lock:
         chat_products = products.setdefault(chat_id, [])
         chat_products.append(
@@ -904,6 +1035,9 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "drop_percent": str(drop_percent),
                 "coupon_notified": info.coupon_exists,
                 "last_coupon_text": info.coupon_text,
+                "page_max_quantity": info.max_quantity,
+                "cart_max_quantity": cart_max_quantity,
+                "cart_max_checked_at": now_ts() if cart_max_quantity else 0,
                 "failure_count": 0,
                 "last_error": "",
                 "next_check_at": now_ts() + MIN_PRODUCT_DELAY,
@@ -918,7 +1052,7 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"📦 {info.title}\n\n"
         f"💰 Fiyat: {format_money(info.price)} TL\n\n"
         f"{coupon_line}\n\n"
-        f"{max_quantity_line(info)}\n\n"
+        f"{max_quantity_line(info, cart_max_quantity)}\n\n"
         f"🎯 Bildirim eşiği: %{drop_percent}\n\n"
         f"🔗 {url}"
     )
@@ -1105,8 +1239,10 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
 
     current_price = info.price
     drop_percent = Decimal(str(product.get("drop_percent", "0")))
+    product["page_max_quantity"] = info.max_quantity
 
     if product.get("pending_initial_price") or not product.get("base_price"):
+        cart_max_quantity = await get_cached_or_probe_cart_quantity(product, url, info)
         product["base_price"] = str(current_price)
         product["last_price"] = str(current_price)
         product["pending_initial_price"] = False
@@ -1122,7 +1258,7 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
             f"📦 {info.title}\n\n"
             f"💰 Başlangıç fiyatı: {format_money(current_price)} TL\n\n"
             f"{coupon_line}\n\n"
-            f"{max_quantity_line(info)}\n\n"
+            f"{max_quantity_line(info, cart_max_quantity)}\n\n"
             f"🎯 Bildirim eşiği: %{drop_percent}",
             url,
         )
@@ -1132,6 +1268,7 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
     drop = calculate_drop(old_price, current_price)
 
     if drop >= drop_percent:
+        cart_max_quantity = await get_cached_or_probe_cart_quantity(product, url, info)
         await notify(
             app,
             chat_id,
@@ -1140,20 +1277,21 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
             f"💸 Eski fiyat: {format_money(old_price)} TL\n"
             f"💰 Yeni fiyat: {format_money(current_price)} TL\n"
             f"📉 Düşüş: %{drop:.2f}\n"
-            f"{max_quantity_line(info)}",
+            f"{max_quantity_line(info, cart_max_quantity)}",
             url,
         )
         product["base_price"] = str(current_price)
 
     last_coupon_text = product.get("last_coupon_text", "")
     if info.coupon_exists and info.coupon_text != last_coupon_text:
+        cart_max_quantity = await get_cached_or_probe_cart_quantity(product, url, info)
         await notify(
             app,
             chat_id,
             "🎟️ Kupon bulundu\n\n"
             f"📦 {info.title}\n"
             f"🧾 {info.coupon_text}\n"
-            f"{max_quantity_line(info)}",
+            f"{max_quantity_line(info, cart_max_quantity)}",
             url,
         )
         product["coupon_notified"] = True

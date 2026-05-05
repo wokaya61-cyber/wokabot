@@ -28,8 +28,8 @@ HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "20"))
 HTTP_RETRIES = int(os.getenv("HTTP_RETRIES", "3"))
 MIN_PRODUCT_DELAY = int(os.getenv("MIN_PRODUCT_DELAY", "3"))
 PENDING_RETRY_SECONDS = int(os.getenv("PENDING_RETRY_SECONDS", "10"))
-CAPTCHA_BACKOFF_SECONDS = int(os.getenv("CAPTCHA_BACKOFF_SECONDS", "60"))
-MAX_BACKOFF_SECONDS = int(os.getenv("MAX_BACKOFF_SECONDS", "300"))
+CAPTCHA_BACKOFF_SECONDS = int(os.getenv("CAPTCHA_BACKOFF_SECONDS", "30"))
+MAX_BACKOFF_SECONDS = int(os.getenv("MAX_BACKOFF_SECONDS", "60"))
 MAX_CONCURRENT_CHECKS = int(os.getenv("MAX_CONCURRENT_CHECKS", "3"))
 
 AMAZON_HOSTS = {"amazon.com.tr", "www.amazon.com.tr"}
@@ -167,8 +167,8 @@ def set_backoff(product: dict[str, Any], reason: str) -> None:
         base_delay = PENDING_RETRY_SECONDS
         delay = base_delay
     else:
-        base_delay = CAPTCHA_BACKOFF_SECONDS if reason == "captcha" else 30
-        delay = min(base_delay * min(failures, 3), MAX_BACKOFF_SECONDS)
+        base_delay = CAPTCHA_BACKOFF_SECONDS if reason == "captcha" else 15
+        delay = min(base_delay * min(failures, 2), MAX_BACKOFF_SECONDS)
 
     delay += random.randint(0, min(10, max(1, delay // 5)))
 

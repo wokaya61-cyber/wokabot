@@ -33,9 +33,6 @@ CAPTCHA_BACKOFF_SECONDS = int(os.getenv("CAPTCHA_BACKOFF_SECONDS", "30"))
 MAX_BACKOFF_SECONDS = int(os.getenv("MAX_BACKOFF_SECONDS", "60"))
 MAX_CONCURRENT_CHECKS = int(os.getenv("MAX_CONCURRENT_CHECKS", "3"))
 MAX_CHECKS_PER_CYCLE = int(os.getenv("MAX_CHECKS_PER_CYCLE", "50"))
-CART_QUANTITY_PROBE_MIN_PAGE_QTY = int(os.getenv("CART_QUANTITY_PROBE_MIN_PAGE_QTY", "5"))
-CART_QUANTITY_PROBE_QTY = int(os.getenv("CART_QUANTITY_PROBE_QTY", "999"))
-CART_QUANTITY_PROBE_TTL_SECONDS = int(os.getenv("CART_QUANTITY_PROBE_TTL_SECONDS", "86400"))
 
 AMAZON_HOSTS = {"amazon.com.tr", "www.amazon.com.tr"}
 RETRY_HTTP_STATUSES = {500, 502, 504}
@@ -520,122 +517,6 @@ def form_payload(form: Any) -> dict[str, str]:
     return payload
 
 
-def parse_cart_quantity(html: str) -> int | None:
-    soup = BeautifulSoup(html, "html.parser")
-    quantities: list[int] = []
-
-    for selector in [
-        "input[name='quantityBox']",
-        "input[name='quantity']",
-        "select[name='quantity'] option[selected]",
-        "[data-a-selector='value']",
-        ".sc-action-quantity input",
-    ]:
-        for element in soup.select(selector):
-            value = element.get("value") or element.get_text(" ", strip=True)
-            match = re.search(r"\d{1,4}", str(value))
-            if match:
-                quantities.append(int(match.group(0)))
-
-    text = " ".join(soup.get_text(" ", strip=True).split())
-    text_patterns = [
-        r"Ara toplam\s*\((\d{1,4})\s*ürün",
-        r"Alt toplam\s*\((\d{1,4})\s*ürün",
-        r"Sepet(?:iniz)?de\s*(\d{1,4})\s*ürün",
-        r"Mktr:\s*(\d{1,4})",
-        r"Adet:\s*(\d{1,4})",
-    ]
-
-    for pattern in text_patterns:
-        for match in re.finditer(pattern, text, re.I):
-            quantities.append(int(match.group(1)))
-
-    return max(quantities) if quantities else None
-
-
-def cart_update_action(soup: BeautifulSoup) -> str:
-    form = soup.select_one("form#activeCartViewForm, form[action*='cart']")
-    action = form.get("action") if form else "/gp/cart/view.html"
-    if not action:
-        action = "/gp/cart/view.html"
-    if action.startswith("/"):
-        action = f"https://www.amazon.com.tr{action}"
-    return action
-
-
-def cart_update_payload(soup: BeautifulSoup) -> dict[str, str]:
-    form = soup.select_one("form#activeCartViewForm, form[action*='cart']")
-    payload = form_payload(form) if form else {}
-
-    for field in soup.select("input[name*='quantity'], input[name*='Quantity'], input[name*='asin'], input[name*='ASIN']"):
-        name = field.get("name")
-        if name and name not in payload:
-            payload[name] = str(field.get("value", ""))
-
-    for key in list(payload.keys()):
-        if "quantity" in key.casefold():
-            payload[key] = str(CART_QUANTITY_PROBE_QTY)
-
-    payload.setdefault("quantityBox", str(CART_QUANTITY_PROBE_QTY))
-    payload.setdefault("quantity", str(CART_QUANTITY_PROBE_QTY))
-    return payload
-
-
-def probe_cart_max_quantity(url: str) -> int | None:
-    headers = build_headers(random.choice(USER_AGENTS))
-    session = requests.Session()
-
-    html = fetch_html(url, headers, session=session)
-    soup = BeautifulSoup(html, "html.parser")
-    form = soup.select_one("form#addToCart, form[action*='handle-buy-box'], form[action*='add-to-cart']")
-    if not form:
-        return None
-
-    action = form.get("action") or "/gp/product/handle-buy-box"
-    if action.startswith("/"):
-        action = f"https://www.amazon.com.tr{action}"
-
-    payload = form_payload(form)
-    payload["quantity"] = str(CART_QUANTITY_PROBE_QTY)
-
-    response = session.post(action, headers=headers, data=payload, timeout=HTTP_TIMEOUT, allow_redirects=True)
-    if response.status_code in BLOCK_HTTP_STATUSES:
-        raise AmazonBlockedError(f"Sepet testi geçici blok döndürdü: HTTP {response.status_code}")
-
-    response.raise_for_status()
-    quantity = parse_cart_quantity(response.text)
-    if quantity and quantity > 20:
-        return quantity
-
-    cart_response = session.get("https://www.amazon.com.tr/gp/cart/view.html", headers=headers, timeout=HTTP_TIMEOUT)
-    cart_response.raise_for_status()
-    cart_quantity = parse_cart_quantity(cart_response.text)
-    if cart_quantity and cart_quantity > 20:
-        return cart_quantity
-
-    cart_soup = BeautifulSoup(cart_response.text, "html.parser")
-    update_response = session.post(
-        cart_update_action(cart_soup),
-        headers=headers,
-        data=cart_update_payload(cart_soup),
-        timeout=HTTP_TIMEOUT,
-        allow_redirects=True,
-    )
-    update_response.raise_for_status()
-
-    updated_quantity = parse_cart_quantity(update_response.text)
-    if updated_quantity:
-        return updated_quantity
-
-    final_cart_response = session.get("https://www.amazon.com.tr/gp/cart/view.html", headers=headers, timeout=HTTP_TIMEOUT)
-    final_cart_response.raise_for_status()
-    return parse_cart_quantity(final_cart_response.text)
-
-
-def should_probe_cart_quantity(page_quantity: int | None) -> bool:
-    return bool(page_quantity and page_quantity >= CART_QUANTITY_PROBE_MIN_PAGE_QTY)
-
-
 def normalize_promo_text(text: str) -> str:
     replacements = str.maketrans(
         {
@@ -878,25 +759,7 @@ def max_quantity_line(info: ProductInfo, cart_max_quantity: int | None = None) -
 
 
 async def get_cart_max_quantity(url: str, info: ProductInfo) -> int | None:
-    if not should_probe_cart_quantity(info.max_quantity):
-        return None
-
-    try:
-        cart_quantity = await asyncio.to_thread(probe_cart_max_quantity, url)
-    except Exception as exc:
-        logger.warning("Cart quantity probe failed for %s: %s", url, exc)
-        return None
-
-    if info.max_quantity and cart_quantity and cart_quantity <= info.max_quantity:
-        logger.info(
-            "Cart quantity probe did not exceed page limit for %s. page=%s cart=%s",
-            url,
-            info.max_quantity,
-            cart_quantity,
-        )
-        return None
-
-    return cart_quantity
+    return None
 
 
 async def get_cached_or_probe_cart_quantity(
@@ -904,18 +767,7 @@ async def get_cached_or_probe_cart_quantity(
     url: str,
     info: ProductInfo,
 ) -> int | None:
-    cached_quantity = product.get("cart_max_quantity")
-    checked_at = int(product.get("cart_max_checked_at", 0) or 0)
-
-    if cached_quantity and checked_at and now_ts() - checked_at < CART_QUANTITY_PROBE_TTL_SECONDS:
-        return int(cached_quantity)
-
-    cart_quantity = await get_cart_max_quantity(url, info)
-    if cart_quantity:
-        product["cart_max_quantity"] = cart_quantity
-        product["cart_max_checked_at"] = now_ts()
-
-    return cart_quantity
+    return None
 
 
 def calculate_drop(old_price: Decimal, new_price: Decimal) -> Decimal:

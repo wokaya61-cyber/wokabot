@@ -513,6 +513,16 @@ def parse_max_quantity(soup: BeautifulSoup, html: str = "") -> int | None:
             if numbers:
                 return max(numbers)
 
+    buyable_selectors = [
+        "#add-to-cart-button",
+        "input[name='submit.add-to-cart']",
+        "button[name='submit.add-to-cart']",
+        "#buy-now-button",
+        "input[name='submit.buy-now']",
+    ]
+    if any(soup.select_one(selector) for selector in buyable_selectors) and parse_stock(soup):
+        return 1
+
     return None
 
 

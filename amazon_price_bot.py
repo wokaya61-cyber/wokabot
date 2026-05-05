@@ -740,7 +740,7 @@ async def add_pending_product(chat_id: str, url: str, drop_percent: Decimal, rea
         "pending_initial_price": True,
         "failure_count": 0,
         "last_error": reason,
-        "next_check_at": now_ts() + 60,
+        "next_check_at": now_ts() + PENDING_RETRY_SECONDS,
         "created_at": int(time.time()),
     }
 

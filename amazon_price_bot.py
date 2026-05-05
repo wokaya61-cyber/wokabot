@@ -458,6 +458,15 @@ def parse_max_quantity(soup: BeautifulSoup, html: str = "") -> int | None:
         "select[name='quantity']",
         "select[name='quantityBox']",
     ]
+    buybox_selectors = [
+        "#quantityRelocate_feature_div",
+        "#selectQuantity",
+        "#quantity_feature_div",
+        "#desktop_buybox",
+        "#buybox",
+        "#rightCol",
+        "#apex_desktop",
+    ]
 
     def option_numbers(select: Any) -> list[int]:
         numbers: list[int] = []
@@ -474,6 +483,16 @@ def parse_max_quantity(soup: BeautifulSoup, html: str = "") -> int | None:
     for selector in quantity_selectors:
         for select in soup.select(selector):
             quantities.extend(option_numbers(select))
+
+    for selector in buybox_selectors:
+        for container in soup.select(selector):
+            for select in container.select("select"):
+                quantities.extend(option_numbers(select))
+
+            for element in container.select(".a-dropdown-item, li[role='option']"):
+                text = element.get_text(" ", strip=True).strip()
+                if re.fullmatch(r"\d{1,3}", text):
+                    quantities.append(int(text))
 
     buy_buttons = [button for selector in buyable_selectors for button in soup.select(selector)]
     for button in buy_buttons:

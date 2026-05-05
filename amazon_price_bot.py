@@ -446,10 +446,28 @@ def parse_stock(soup: BeautifulSoup) -> bool:
 def parse_max_quantity(soup: BeautifulSoup, html: str = "") -> int | None:
     quantities: list[int] = []
 
-    for selector in ["#quantity", "select[name='quantity']"]:
+    for selector in [
+        "#quantity",
+        "#quantity-native",
+        "#mobileQuantityDropDown",
+        "select[name='quantity']",
+        "select[name='quantityBox']",
+    ]:
         for option in soup.select(f"{selector} option"):
             value = option.get("value") or option.get_text(" ", strip=True)
             match = re.search(r"\d+", str(value))
+            if match:
+                quantities.append(int(match.group(0)))
+
+    for select in soup.select("select"):
+        attrs = " ".join(str(value) for value in select.attrs.values()).casefold()
+        label = " ".join(select.get_text(" ", strip=True).split()).casefold()
+        if not any(marker in attrs or marker in label for marker in ["quantity", "qty", "adet", "miktar"]):
+            continue
+
+        for option in select.select("option"):
+            value = option.get("value") or option.get_text(" ", strip=True)
+            match = re.search(r"\d{1,3}", str(value))
             if match:
                 quantities.append(int(match.group(0)))
 
@@ -467,10 +485,12 @@ def parse_max_quantity(soup: BeautifulSoup, html: str = "") -> int | None:
         r'"maxOrderQuantity"\s*:\s*(\d{1,3})',
         r'"quantityLimit"\s*:\s*(\d{1,3})',
         r'"quantityOptions"\s*:\s*\[([^\]]+)\]',
+        r'"quantityDropDownOptions"\s*:\s*\[([^\]]+)\]',
+        r'<select[^>]*(?:quantity|qty|adet|miktar)[^>]*>(.*?)</select>',
     ]
 
     for pattern in json_patterns:
-        for match in re.finditer(pattern, html):
+        for match in re.finditer(pattern, html, re.I | re.S):
             if match.lastindex and match.lastindex >= 1:
                 numbers = [int(value) for value in re.findall(r"\d{1,3}", match.group(1))]
                 quantities.extend(numbers)

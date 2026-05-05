@@ -785,6 +785,8 @@ def product_status_line(product: dict[str, Any]) -> str:
     clamp_next_check(product)
 
     if product.get("pending_initial_price"):
+        if product.get("last_error") == "Amazon saticisi bekleniyor":
+            return "⏳ Amazon.com.tr saticisi bekleniyor"
         next_check_at = int(product.get("next_check_at", 0) or 0)
         wait_seconds = max(0, next_check_at - now_ts())
         if wait_seconds:
@@ -917,20 +919,24 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
+    if not info.seller_ok:
+        seller = f"\nSatici bilgisi: {info.seller_text}" if info.seller_text else ""
+        await add_pending_product(chat_id, url, drop_percent, "amazon_seller_wait", info.title)
+        await update.message.reply_text(
+            "⏳ Urun takip listesine eklendi.\n\n"
+            f"📦 {info.title}\n"
+            "Satici su an amazon.com.tr gorunmedigi icin fiyat/kupon takibi baslatilmadi. "
+            "Bot kontrollerde once saticiya bakacak; Amazon satmaya baslayinca baslangic fiyatini kaydedip takibi aktif edecek."
+            f"{seller}"
+        )
+        return
+
     if not info.price:
         await add_pending_product(chat_id, url, drop_percent, "price_missing", info.title)
         await update.message.reply_text(
             "⏳ Ürün bulundu ama fiyat şu an okunamadı.\n\n"
             f"📦 {info.title}\n"
             "Link takip listesine beklemede olarak eklendi. Bot arkada tekrar deneyecek."
-        )
-        return
-
-    if not info.seller_ok:
-        seller = f"\nSatıcı bilgisi: {info.seller_text}" if info.seller_text else ""
-        await update.message.reply_text(
-            "Bu ürünün satıcısı amazon.com.tr görünmüyor, takip listesine eklemedim."
-            f"{seller}"
         )
         return
 
@@ -1126,21 +1132,8 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
 
     if not info.seller_ok:
         product["seller_ok"] = False
-        if product.get("pending_initial_price"):
-            if not info.seller_text:
-                set_backoff(product, "seller_missing")
-                return
-
-            product["disabled"] = True
-            product["last_error"] = "Satıcı amazon.com.tr değil"
-            await notify(
-                app,
-                chat_id,
-                "⛔ Ürün takip dışı bırakıldı\n\n"
-                f"📦 {info.title}\n"
-                "Satıcı amazon.com.tr olarak görünmediği için takip başlatılmadı.",
-                url,
-            )
+        product["last_error"] = "Amazon saticisi bekleniyor"
+        product["pending_initial_price"] = True
         return
 
     product["seller_ok"] = True
@@ -1166,7 +1159,7 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         await notify(
             app,
             chat_id,
-            "✅ Bekleyen ürün takibe alındı\n\n"
+            "✅ Amazon.com.tr satmaya basladi, urun takibe alindi\n\n"
             f"📦 {info.title}\n\n"
             f"💰 Başlangıç fiyatı: {format_money(current_price)} TL\n\n"
             f"{coupon_line}\n\n"

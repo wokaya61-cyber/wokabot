@@ -28,8 +28,8 @@ HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "20"))
 HTTP_RETRIES = int(os.getenv("HTTP_RETRIES", "3"))
 MIN_PRODUCT_DELAY = int(os.getenv("MIN_PRODUCT_DELAY", "3"))
 PENDING_RETRY_SECONDS = int(os.getenv("PENDING_RETRY_SECONDS", "10"))
-CAPTCHA_BACKOFF_SECONDS = int(os.getenv("CAPTCHA_BACKOFF_SECONDS", "300"))
-MAX_BACKOFF_SECONDS = int(os.getenv("MAX_BACKOFF_SECONDS", "3600"))
+CAPTCHA_BACKOFF_SECONDS = int(os.getenv("CAPTCHA_BACKOFF_SECONDS", "60"))
+MAX_BACKOFF_SECONDS = int(os.getenv("MAX_BACKOFF_SECONDS", "300"))
 MAX_CONCURRENT_CHECKS = int(os.getenv("MAX_CONCURRENT_CHECKS", "3"))
 
 AMAZON_HOSTS = {"amazon.com.tr", "www.amazon.com.tr"}
@@ -146,17 +146,30 @@ def now_ts() -> int:
 
 
 def is_due(product: dict[str, Any]) -> bool:
+    clamp_next_check(product)
     return now_ts() >= int(product.get("next_check_at", 0) or 0)
+
+
+def clamp_next_check(product: dict[str, Any]) -> None:
+    next_check_at = int(product.get("next_check_at", 0) or 0)
+    if not next_check_at:
+        return
+
+    max_wait = PENDING_RETRY_SECONDS if product.get("pending_initial_price") else MAX_BACKOFF_SECONDS
+    latest_allowed = now_ts() + max_wait
+    if next_check_at > latest_allowed:
+        product["next_check_at"] = latest_allowed
 
 
 def set_backoff(product: dict[str, Any], reason: str) -> None:
     failures = int(product.get("failure_count", 0) or 0) + 1
     if product.get("pending_initial_price"):
         base_delay = PENDING_RETRY_SECONDS
+        delay = base_delay
     else:
         base_delay = CAPTCHA_BACKOFF_SECONDS if reason == "captcha" else 30
+        delay = min(base_delay * min(failures, 3), MAX_BACKOFF_SECONDS)
 
-    delay = min(base_delay * (2 ** min(failures - 1, 4)), MAX_BACKOFF_SECONDS)
     delay += random.randint(0, min(10, max(1, delay // 5)))
 
     product["failure_count"] = failures
@@ -638,6 +651,8 @@ def product_label(product: dict[str, Any]) -> str:
 
 
 def product_status_line(product: dict[str, Any]) -> str:
+    clamp_next_check(product)
+
     if product.get("pending_initial_price"):
         return "⏳ İlk başarılı fiyat okuması bekleniyor"
 

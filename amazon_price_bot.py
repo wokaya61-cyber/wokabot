@@ -508,6 +508,42 @@ def parse_max_quantity(soup: BeautifulSoup, html: str = "") -> int | None:
 
         return numbers
 
+    def quantity_numbers_after_stock_text() -> list[int]:
+        page_text = " ".join(soup.get_text(" ", strip=True).split())
+        lower_text = page_text.casefold()
+        numbers: list[int] = []
+
+        for marker in ["stokta var", "stokta mevcut"]:
+            start = lower_text.find(marker)
+            if start < 0:
+                continue
+
+            window = page_text[start + len(marker) : start + len(marker) + 350]
+            stop_positions = [
+                position
+                for stop_word in [
+                    "sepete ekle",
+                    "şimdi al",
+                    "simdi al",
+                    "gönderici",
+                    "gonderici",
+                    "satıcı",
+                    "satici",
+                    "iadeler",
+                    "teslimat",
+                ]
+                for position in [window.casefold().find(stop_word)]
+                if position >= 0
+            ]
+            if stop_positions:
+                window = window[: min(stop_positions)]
+
+            matches = re.findall(r"(?<![\d.,])\d{1,3}(?![\d.,])", window)
+            if len(matches) >= 2:
+                numbers.extend(int(value) for value in matches)
+
+        return numbers
+
     quantities: list[int] = []
 
     for selector in quantity_selectors:
@@ -526,6 +562,9 @@ def parse_max_quantity(soup: BeautifulSoup, html: str = "") -> int | None:
 
     if not quantities:
         quantities.extend(quantity_numbers_from_html())
+
+    if not quantities:
+        quantities.extend(quantity_numbers_after_stock_text())
 
     distinct_quantities = sorted(set(quantities))
     if len(distinct_quantities) >= 2:

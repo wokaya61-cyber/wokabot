@@ -444,103 +444,6 @@ def parse_stock(soup: BeautifulSoup) -> bool:
 
 
 def parse_max_quantity(soup: BeautifulSoup, html: str = "") -> int | None:
-    quantities: list[int] = []
-
-    for selector in [
-        "#quantity",
-        "#quantity-native",
-        "#mobileQuantityDropDown",
-        "select[name='quantity']",
-        "select[name='quantityBox']",
-    ]:
-        for option in soup.select(f"{selector} option"):
-            value = option.get("value") or option.get_text(" ", strip=True)
-            match = re.search(r"\d+", str(value))
-            if match:
-                quantities.append(int(match.group(0)))
-
-    for select in soup.select("select"):
-        attrs = " ".join(str(value) for value in select.attrs.values()).casefold()
-        label = " ".join(select.get_text(" ", strip=True).split()).casefold()
-        if not any(marker in attrs or marker in label for marker in ["quantity", "qty", "adet", "miktar"]):
-            continue
-
-        for option in select.select("option"):
-            value = option.get("value") or option.get_text(" ", strip=True)
-            match = re.search(r"\d{1,3}", str(value))
-            if match:
-                quantities.append(int(match.group(0)))
-
-    for select in soup.select("select"):
-        option_numbers: list[int] = []
-        option_texts: list[str] = []
-
-        for option in select.select("option"):
-            value = str(option.get("value") or option.get_text(" ", strip=True)).strip()
-            text = option.get_text(" ", strip=True).strip()
-            candidate = value or text
-            if not candidate:
-                continue
-
-            option_texts.append(candidate)
-            if re.fullmatch(r"\d{1,3}", candidate):
-                option_numbers.append(int(candidate))
-
-        if len(option_numbers) >= 2 and len(option_numbers) == len(option_texts):
-            quantities.append(max(option_numbers))
-
-    for element in soup.select(".a-dropdown-item, li[role='option'], [data-value]"):
-        text = element.get_text(" ", strip=True).strip()
-        data_value = str(element.get("data-value", "")).strip()
-        candidates = [text, data_value]
-
-        for candidate in candidates:
-            match = re.fullmatch(r"\d{1,3}", candidate)
-            if match:
-                quantities.append(int(match.group(0)))
-
-    for element in soup.select("[data-quantity], [data-a-selector='quantity']"):
-        for value in element.attrs.values():
-            match = re.search(r"\d+", str(value))
-            if match:
-                quantities.append(int(match.group(0)))
-
-    if quantities:
-        return max(quantities)
-
-    json_patterns = [
-        r'"maxQuantity"\s*:\s*(\d{1,3})',
-        r'"maxOrderQuantity"\s*:\s*(\d{1,3})',
-        r'"quantityLimit"\s*:\s*(\d{1,3})',
-        r'"quantityOptions"\s*:\s*\[([^\]]+)\]',
-        r'"quantityDropDownOptions"\s*:\s*\[([^\]]+)\]',
-        r'<select[^>]*(?:quantity|qty|adet|miktar)[^>]*>(.*?)</select>',
-    ]
-
-    for pattern in json_patterns:
-        for match in re.finditer(pattern, html, re.I | re.S):
-            if match.lastindex and match.lastindex >= 1:
-                numbers = [int(value) for value in re.findall(r"\d{1,3}", match.group(1))]
-                quantities.extend(numbers)
-
-    if quantities:
-        return max(quantities)
-
-    page_text = " ".join(soup.get_text(" ", strip=True).split())
-    patterns = [
-        r"(?:en fazla|maksimum|max)\s*(\d{1,3})\s*(?:adet|tane)",
-        r"(?:adet|miktar).{0,40}?(?:en fazla|maksimum|max)\s*(\d{1,3})",
-        r"(\d{1,3})\s*(?:adet|tane).{0,40}?(?:satın alabilirsiniz|alinabilir|alabilirsiniz)",
-        r"adet\s*:\s*((?:\d{1,3}\s*){2,30})",
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, page_text, re.I)
-        if match:
-            numbers = [int(value) for value in re.findall(r"\d{1,3}", match.group(1))]
-            if numbers:
-                return max(numbers)
-
     buyable_selectors = [
         "#add-to-cart-button",
         "input[name='submit.add-to-cart']",
@@ -548,11 +451,47 @@ def parse_max_quantity(soup: BeautifulSoup, html: str = "") -> int | None:
         "#buy-now-button",
         "input[name='submit.buy-now']",
     ]
-    if any(soup.select_one(selector) for selector in buyable_selectors) and parse_stock(soup):
+    quantity_selectors = [
+        "#quantity",
+        "#quantity-native",
+        "#mobileQuantityDropDown",
+        "select[name='quantity']",
+        "select[name='quantityBox']",
+    ]
+
+    def option_numbers(select: Any) -> list[int]:
+        numbers: list[int] = []
+        for option in select.select("option"):
+            text = option.get_text(" ", strip=True).strip()
+            value = str(option.get("value", "")).strip()
+            candidate = text if re.fullmatch(r"\d{1,3}", text) else value
+            if re.fullmatch(r"\d{1,3}", candidate):
+                numbers.append(int(candidate))
+        return numbers
+
+    quantities: list[int] = []
+
+    for selector in quantity_selectors:
+        for select in soup.select(selector):
+            quantities.extend(option_numbers(select))
+
+    buy_buttons = [button for selector in buyable_selectors for button in soup.select(selector)]
+    for button in buy_buttons:
+        current = button
+        depth = 0
+        while current and depth < 8:
+            for select in current.select("select") if hasattr(current, "select") else []:
+                quantities.extend(option_numbers(select))
+            current = current.parent
+            depth += 1
+
+    if quantities:
+        return max(quantities)
+
+    if buy_buttons and parse_stock(soup):
         return 1
 
     return None
-
 
 def form_payload(form: Any) -> dict[str, str]:
     payload: dict[str, str] = {}

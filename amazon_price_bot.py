@@ -553,11 +553,39 @@ def parse_cart_quantity(html: str) -> int | None:
     return max(quantities) if quantities else None
 
 
+def cart_update_action(soup: BeautifulSoup) -> str:
+    form = soup.select_one("form#activeCartViewForm, form[action*='cart']")
+    action = form.get("action") if form else "/gp/cart/view.html"
+    if not action:
+        action = "/gp/cart/view.html"
+    if action.startswith("/"):
+        action = f"https://www.amazon.com.tr{action}"
+    return action
+
+
+def cart_update_payload(soup: BeautifulSoup) -> dict[str, str]:
+    form = soup.select_one("form#activeCartViewForm, form[action*='cart']")
+    payload = form_payload(form) if form else {}
+
+    for field in soup.select("input[name*='quantity'], input[name*='Quantity'], input[name*='asin'], input[name*='ASIN']"):
+        name = field.get("name")
+        if name and name not in payload:
+            payload[name] = str(field.get("value", ""))
+
+    for key in list(payload.keys()):
+        if "quantity" in key.casefold():
+            payload[key] = str(CART_QUANTITY_PROBE_QTY)
+
+    payload.setdefault("quantityBox", str(CART_QUANTITY_PROBE_QTY))
+    payload.setdefault("quantity", str(CART_QUANTITY_PROBE_QTY))
+    return payload
+
+
 def probe_cart_max_quantity(url: str) -> int | None:
     headers = build_headers(random.choice(USER_AGENTS))
     session = requests.Session()
 
-    html = fetch_html(url, headers)
+    html = fetch_html(url, headers, session=session)
     soup = BeautifulSoup(html, "html.parser")
     form = soup.select_one("form#addToCart, form[action*='handle-buy-box'], form[action*='add-to-cart']")
     if not form:
@@ -576,12 +604,32 @@ def probe_cart_max_quantity(url: str) -> int | None:
 
     response.raise_for_status()
     quantity = parse_cart_quantity(response.text)
-    if quantity:
+    if quantity and quantity > 20:
         return quantity
 
     cart_response = session.get("https://www.amazon.com.tr/gp/cart/view.html", headers=headers, timeout=HTTP_TIMEOUT)
     cart_response.raise_for_status()
-    return parse_cart_quantity(cart_response.text)
+    cart_quantity = parse_cart_quantity(cart_response.text)
+    if cart_quantity and cart_quantity > 20:
+        return cart_quantity
+
+    cart_soup = BeautifulSoup(cart_response.text, "html.parser")
+    update_response = session.post(
+        cart_update_action(cart_soup),
+        headers=headers,
+        data=cart_update_payload(cart_soup),
+        timeout=HTTP_TIMEOUT,
+        allow_redirects=True,
+    )
+    update_response.raise_for_status()
+
+    updated_quantity = parse_cart_quantity(update_response.text)
+    if updated_quantity:
+        return updated_quantity
+
+    final_cart_response = session.get("https://www.amazon.com.tr/gp/cart/view.html", headers=headers, timeout=HTTP_TIMEOUT)
+    final_cart_response.raise_for_status()
+    return parse_cart_quantity(final_cart_response.text)
 
 
 def should_probe_cart_quantity(page_quantity: int | None) -> bool:
@@ -682,13 +730,14 @@ def parse_coupon(soup: BeautifulSoup) -> tuple[bool, str]:
     return True, coupon_text[:240]
 
 
-def fetch_html(url: str, headers: dict[str, str]) -> str:
+def fetch_html(url: str, headers: dict[str, str], session: requests.Session | None = None) -> str:
+    active_session = session or http_session
     response = None
     last_error: Exception | None = None
 
     for attempt in range(1, HTTP_RETRIES + 1):
         try:
-            response = http_session.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+            response = active_session.get(url, headers=headers, timeout=HTTP_TIMEOUT)
             if response.status_code in RETRY_HTTP_STATUSES and attempt < HTTP_RETRIES:
                 logger.warning(
                     "Amazon returned HTTP %s for %s. Attempt %s/%s",

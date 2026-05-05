@@ -478,6 +478,43 @@ def parse_max_quantity(soup: BeautifulSoup, html: str = "") -> int | None:
                 numbers.append(int(candidate))
         return numbers
 
+    def quantity_numbers_from_html() -> list[int]:
+        numbers: list[int] = []
+        markers = [
+            "quantity",
+            "quantityRelocate",
+            "selectQuantity",
+            "quantity_feature_div",
+            "quantityDropDown",
+            "quantityBox",
+        ]
+        seen_snippets: set[str] = set()
+
+        for marker in markers:
+            for match in re.finditer(re.escape(marker), html, re.I):
+                start = max(0, match.start() - 1500)
+                end = min(len(html), match.end() + 3000)
+                snippet = html[start:end]
+                if snippet in seen_snippets:
+                    continue
+                seen_snippets.add(snippet)
+
+                for select_match in re.finditer(r"<select\b[^>]*>(.*?)</select>", snippet, re.I | re.S):
+                    select_soup = BeautifulSoup(select_match.group(0), "html.parser")
+                    select = select_soup.select_one("select")
+                    if select:
+                        numbers.extend(option_numbers(select))
+
+                option_patterns = [
+                    r"<option\b[^>]*value=[\"']?(\d{1,3})[\"']?[^>]*>\s*\d{1,3}\s*</option>",
+                    r"<li\b[^>]*(?:role=[\"']option[\"']|data-value=[\"']?\d{1,3})[^>]*>\s*(\d{1,3})\s*</li>",
+                    r"(?:displayValue|displayText|value|text)[\"']?\s*[:=]\s*[\"'](\d{1,3})[\"']",
+                ]
+                for pattern in option_patterns:
+                    numbers.extend(int(value) for value in re.findall(pattern, snippet, re.I | re.S))
+
+        return numbers
+
     quantities: list[int] = []
 
     for selector in quantity_selectors:
@@ -503,6 +540,9 @@ def parse_max_quantity(soup: BeautifulSoup, html: str = "") -> int | None:
                 quantities.extend(option_numbers(select))
             current = current.parent
             depth += 1
+
+    if not quantities:
+        quantities.extend(quantity_numbers_from_html())
 
     if quantities:
         return max(quantities)

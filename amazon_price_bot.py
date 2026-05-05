@@ -471,6 +471,34 @@ def parse_max_quantity(soup: BeautifulSoup, html: str = "") -> int | None:
             if match:
                 quantities.append(int(match.group(0)))
 
+    for select in soup.select("select"):
+        option_numbers: list[int] = []
+        option_texts: list[str] = []
+
+        for option in select.select("option"):
+            value = str(option.get("value") or option.get_text(" ", strip=True)).strip()
+            text = option.get_text(" ", strip=True).strip()
+            candidate = value or text
+            if not candidate:
+                continue
+
+            option_texts.append(candidate)
+            if re.fullmatch(r"\d{1,3}", candidate):
+                option_numbers.append(int(candidate))
+
+        if len(option_numbers) >= 2 and len(option_numbers) == len(option_texts):
+            quantities.append(max(option_numbers))
+
+    for element in soup.select(".a-dropdown-item, li[role='option'], [data-value]"):
+        text = element.get_text(" ", strip=True).strip()
+        data_value = str(element.get("data-value", "")).strip()
+        candidates = [text, data_value]
+
+        for candidate in candidates:
+            match = re.fullmatch(r"\d{1,3}", candidate)
+            if match:
+                quantities.append(int(match.group(0)))
+
     for element in soup.select("[data-quantity], [data-a-selector='quantity']"):
         for value in element.attrs.values():
             match = re.search(r"\d+", str(value))

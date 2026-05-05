@@ -33,6 +33,7 @@ CAPTCHA_BACKOFF_SECONDS = int(os.getenv("CAPTCHA_BACKOFF_SECONDS", "30"))
 MAX_BACKOFF_SECONDS = int(os.getenv("MAX_BACKOFF_SECONDS", "60"))
 MAX_CONCURRENT_CHECKS = int(os.getenv("MAX_CONCURRENT_CHECKS", "3"))
 MAX_CHECKS_PER_CYCLE = int(os.getenv("MAX_CHECKS_PER_CYCLE", "50"))
+FOLLOWUP_DROP_PERCENT = Decimal(os.getenv("FOLLOWUP_DROP_PERCENT", "1"))
 
 AMAZON_HOSTS = {"amazon.com.tr", "www.amazon.com.tr"}
 RETRY_HTTP_STATUSES = {500, 502, 504}
@@ -828,6 +829,7 @@ async def add_pending_product(chat_id: str, url: str, drop_percent: Decimal, rea
         "base_price": "",
         "last_price": "",
         "drop_percent": str(drop_percent),
+        "first_drop_notified": False,
         "coupon_notified": False,
         "last_coupon_text": "",
         "pending_initial_price": True,
@@ -951,6 +953,7 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "base_price": str(info.price),
                 "last_price": str(info.price),
                 "drop_percent": str(drop_percent),
+                "first_drop_notified": False,
                 "coupon_notified": info.coupon_exists,
                 "last_coupon_text": info.coupon_text,
                 "page_max_quantity": info.max_quantity,
@@ -971,7 +974,8 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"💰 Fiyat: {format_money(info.price)} TL\n\n"
         f"{coupon_line}\n\n"
         f"{max_quantity_line(info, cart_max_quantity)}\n\n"
-        f"🎯 Bildirim eşiği: %{drop_percent}\n\n"
+        f"🎯 Ilk bildirim esigi: %{drop_percent}\n"
+        f"Sonraki fiyat dusus esigi: %{FOLLOWUP_DROP_PERCENT}\n\n"
         f"🔗 {url}"
     )
 
@@ -1143,12 +1147,14 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         return
 
     current_price = info.price
-    drop_percent = Decimal(str(product.get("drop_percent", "0")))
+    initial_drop_percent = Decimal(str(product.get("drop_percent", "0")))
+    drop_percent = FOLLOWUP_DROP_PERCENT if product.get("first_drop_notified") else initial_drop_percent
     product["page_max_quantity"] = info.max_quantity
 
     if product.get("pending_initial_price") or not product.get("base_price"):
         cart_max_quantity = await get_cached_or_probe_cart_quantity(product, url, info)
         product["base_price"] = str(current_price)
+        product["first_drop_notified"] = False
         product["last_price"] = str(current_price)
         product["pending_initial_price"] = False
         product["coupon_notified"] = info.coupon_exists
@@ -1164,7 +1170,8 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
             f"💰 Başlangıç fiyatı: {format_money(current_price)} TL\n\n"
             f"{coupon_line}\n\n"
             f"{max_quantity_line(info, cart_max_quantity)}\n\n"
-            f"🎯 Bildirim eşiği: %{drop_percent}",
+            f"🎯 Ilk bildirim esigi: %{initial_drop_percent}\n"
+            f"Sonraki fiyat dusus esigi: %{FOLLOWUP_DROP_PERCENT}",
             url,
         )
         return
@@ -1182,10 +1189,12 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
             f"💸 Eski fiyat: {format_money(old_price)} TL\n"
             f"💰 Yeni fiyat: {format_money(current_price)} TL\n"
             f"📉 Düşüş: %{drop:.2f}\n"
+            f"Sonraki fiyat dusus esigi: %{FOLLOWUP_DROP_PERCENT}\n"
             f"{max_quantity_line(info, cart_max_quantity)}",
             url,
         )
         product["base_price"] = str(current_price)
+        product["first_drop_notified"] = True
 
     last_coupon_text = product.get("last_coupon_text", "")
     if info.coupon_exists and info.coupon_text != last_coupon_text:

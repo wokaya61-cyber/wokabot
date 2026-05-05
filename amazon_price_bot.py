@@ -882,10 +882,21 @@ async def get_cart_max_quantity(url: str, info: ProductInfo) -> int | None:
         return None
 
     try:
-        return await asyncio.to_thread(probe_cart_max_quantity, url)
+        cart_quantity = await asyncio.to_thread(probe_cart_max_quantity, url)
     except Exception as exc:
         logger.warning("Cart quantity probe failed for %s: %s", url, exc)
         return None
+
+    if info.max_quantity and cart_quantity and cart_quantity <= info.max_quantity:
+        logger.info(
+            "Cart quantity probe did not exceed page limit for %s. page=%s cart=%s",
+            url,
+            info.max_quantity,
+            cart_quantity,
+        )
+        return None
+
+    return cart_quantity
 
 
 async def get_cached_or_probe_cart_quantity(

@@ -43,6 +43,12 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko) Version/17.4 Safari/605.1.15",
 ]
+MOBILE_USER_AGENTS = [
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+]
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -117,6 +123,9 @@ def clean_amazon_url(url: str) -> str:
 
 
 def mobile_amazon_url(url: str) -> str:
+    match = re.search(r"/dp/([A-Z0-9]{10})", url, re.I)
+    if match:
+        return f"https://www.amazon.com.tr/gp/aw/d/{match.group(1).upper()}"
     return url.replace("https://www.amazon.com.tr/", "https://www.amazon.com.tr/gp/aw/")
 
 
@@ -634,8 +643,8 @@ def parse_product_html(html: str) -> ProductInfo | None:
     )
 
 
-def fetch_product_info(url: str) -> ProductInfo | None:
-    headers = {
+def build_headers(user_agent: str) -> dict[str, str]:
+    return {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.7,en;q=0.6",
         "Connection": "keep-alive",
@@ -643,12 +652,21 @@ def fetch_product_info(url: str) -> ProductInfo | None:
         "Pragma": "no-cache",
         "Referer": "https://www.amazon.com.tr/",
         "Upgrade-Insecure-Requests": "1",
-        "User-Agent": random.choice(USER_AGENTS),
+        "User-Agent": user_agent,
     }
 
+
+def fetch_product_info(url: str) -> ProductInfo | None:
     errors: list[str] = []
-    for candidate_url in [url, mobile_amazon_url(url)]:
+    blocked_errors: list[str] = []
+    candidates = [
+        (url, random.choice(USER_AGENTS)),
+        (mobile_amazon_url(url), random.choice(MOBILE_USER_AGENTS)),
+    ]
+
+    for candidate_url, user_agent in candidates:
         try:
+            headers = build_headers(user_agent)
             html = fetch_html(candidate_url, headers)
             info = parse_product_html(html)
             if info and info.price:
@@ -656,13 +674,17 @@ def fetch_product_info(url: str) -> ProductInfo | None:
 
             if info:
                 errors.append(f"{candidate_url}: fiyat yok")
-        except AmazonBlockedError:
-            raise
+        except AmazonBlockedError as exc:
+            blocked_errors.append(f"{candidate_url}: {exc}")
+            continue
         except Exception as exc:
             errors.append(f"{candidate_url}: {exc}")
 
     if errors:
         raise AmazonReadError(" / ".join(errors[-2:]))
+
+    if blocked_errors:
+        raise AmazonBlockedError(" / ".join(blocked_errors[-2:]))
 
     return None
 
@@ -698,7 +720,11 @@ def product_status_line(product: dict[str, Any]) -> str:
     clamp_next_check(product)
 
     if product.get("pending_initial_price"):
-        return "⏳ İlk başarılı fiyat okuması bekleniyor"
+        next_check_at = int(product.get("next_check_at", 0) or 0)
+        wait_seconds = max(0, next_check_at - now_ts())
+        if wait_seconds:
+            return f"⏳ İlk başarılı fiyat okuması bekleniyor, yaklaşık {wait_seconds} sn sonra tekrar denenecek"
+        return "⏳ İlk başarılı fiyat okuması bekleniyor, sıradaki kontrolde denenecek"
 
     if product.get("disabled"):
         return f"⛔ Pasif: {product.get('last_error', 'takip durduruldu')}"

@@ -442,7 +442,7 @@ def parse_stock(soup: BeautifulSoup) -> bool:
     return True
 
 
-def parse_max_quantity(soup: BeautifulSoup) -> int | None:
+def parse_max_quantity(soup: BeautifulSoup, html: str = "") -> int | None:
     quantities: list[int] = []
 
     for selector in ["#quantity", "select[name='quantity']"]:
@@ -461,17 +461,36 @@ def parse_max_quantity(soup: BeautifulSoup) -> int | None:
     if quantities:
         return max(quantities)
 
+    json_patterns = [
+        r'"maxQuantity"\s*:\s*(\d{1,3})',
+        r'"maxOrderQuantity"\s*:\s*(\d{1,3})',
+        r'"quantityLimit"\s*:\s*(\d{1,3})',
+        r'"quantityOptions"\s*:\s*\[([^\]]+)\]',
+    ]
+
+    for pattern in json_patterns:
+        for match in re.finditer(pattern, html):
+            if match.lastindex and match.lastindex >= 1:
+                numbers = [int(value) for value in re.findall(r"\d{1,3}", match.group(1))]
+                quantities.extend(numbers)
+
+    if quantities:
+        return max(quantities)
+
     page_text = " ".join(soup.get_text(" ", strip=True).split())
     patterns = [
         r"(?:en fazla|maksimum|max)\s*(\d{1,3})\s*(?:adet|tane)",
         r"(?:adet|miktar).{0,40}?(?:en fazla|maksimum|max)\s*(\d{1,3})",
         r"(\d{1,3})\s*(?:adet|tane).{0,40}?(?:satın alabilirsiniz|alinabilir|alabilirsiniz)",
+        r"adet\s*:\s*((?:\d{1,3}\s*){2,30})",
     ]
 
     for pattern in patterns:
         match = re.search(pattern, page_text, re.I)
         if match:
-            return int(match.group(1))
+            numbers = [int(value) for value in re.findall(r"\d{1,3}", match.group(1))]
+            if numbers:
+                return max(numbers)
 
     return None
 
@@ -504,6 +523,11 @@ def promotion_match(text: str) -> str:
         r"odeme.{0,60}?(?:esnasinda|sirasinda).{0,80}?(?:\d{1,5}(?:[.,]\d{1,2})?\s*tl|%\s*\d{1,2}).{0,80}?(?:tasarruf|indirim)",
         r"(?:\d+\s*(?:veya)?\s*daha\s*fazla\s*al|daha\s*fazla\s*al).{0,80}?%\s*\d{1,2}.{0,80}?indirim\s*kazan",
         r"cok\s*al.{0,40}?(?:az\s*ode|indirim).{0,80}?(?:%\s*\d{1,2}|\d{1,5}(?:[.,]\d{1,2})?\s*tl)",
+        r"(?:prime\s*uyelerine\s*ozel|uyelere\s*ozel).{0,80}?(?:\d{1,5}(?:[.,]\d{1,2})?\s*tl|%\s*\d{1,2}).{0,80}?(?:promosyon|indirim|kod)",
+        r"(?:promosyon\s*kodu|promosyon\s*kod).{0,100}?(?:[a-z0-9]{3,}|indirim|tl|%)",
+        r"(?:\d{1,5}(?:[.,]\d{1,2})?\s*tl|%\s*\d{1,2}).{0,80}?(?:kazandiran|kazandıran).{0,80}?promosyon\s*kodu",
+        r"bir\s*sonraki.{0,80}?(?:siparisiniz|siparis).{0,80}?(?:\d{1,5}(?:[.,]\d{1,2})?\s*tl|%\s*\d{1,2}).{0,80}?(?:kupon|indirim).{0,40}?kazan",
+        r"amazon\s*tarafindan\s*yapilan\s*indirim",
     ]
 
     for pattern in promo_patterns:
@@ -639,7 +663,7 @@ def parse_product_html(html: str) -> ProductInfo | None:
         coupon_exists=coupon_exists,
         coupon_text=coupon_text,
         in_stock=parse_stock(soup),
-        max_quantity=parse_max_quantity(soup),
+        max_quantity=parse_max_quantity(soup, html),
     )
 
 

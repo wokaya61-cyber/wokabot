@@ -892,20 +892,31 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Takip listen boş.")
         return
 
-    lines = ["📋 Takip edilen ürünler:\n"]
+    messages: list[str] = []
+    current_message = "📋 Takip edilen ürünler:\n"
+
     for index, product in enumerate(chat_products, start=1):
-        lines.extend(
-            [
+        product_block = "\n".join(
+            (
                 f"{index}. 📦 {product_label(product)}",
                 f"💰 Fiyat: {format_money(product.get('last_price'))} TL",
                 f"🎯 Eşik: %{product.get('drop_percent')}",
                 product_status_line(product),
                 f"🔗 {product.get('url', '')}",
                 "",
-            ]
+            )
         )
 
-    await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
+        if len(current_message) + len(product_block) > 3500:
+            messages.append(current_message)
+            current_message = "📋 Takip edilen ürünler devamı:\n"
+
+        current_message += f"\n{product_block}"
+
+    messages.append(current_message)
+
+    for message in messages:
+        await update.message.reply_text(message, disable_web_page_preview=True)
 
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

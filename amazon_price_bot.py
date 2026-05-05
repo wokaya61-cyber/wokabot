@@ -444,13 +444,6 @@ def parse_stock(soup: BeautifulSoup) -> bool:
 
 
 def parse_max_quantity(soup: BeautifulSoup, html: str = "") -> int | None:
-    buyable_selectors = [
-        "#add-to-cart-button",
-        "input[name='submit.add-to-cart']",
-        "button[name='submit.add-to-cart']",
-        "#buy-now-button",
-        "input[name='submit.buy-now']",
-    ]
     quantity_selectors = [
         "#quantity",
         "#quantity-native",
@@ -531,24 +524,12 @@ def parse_max_quantity(soup: BeautifulSoup, html: str = "") -> int | None:
                 if re.fullmatch(r"\d{1,3}", text):
                     quantities.append(int(text))
 
-    buy_buttons = [button for selector in buyable_selectors for button in soup.select(selector)]
-    for button in buy_buttons:
-        current = button
-        depth = 0
-        while current and depth < 8:
-            for select in current.select("select") if hasattr(current, "select") else []:
-                quantities.extend(option_numbers(select))
-            current = current.parent
-            depth += 1
-
     if not quantities:
         quantities.extend(quantity_numbers_from_html())
 
-    if quantities:
-        return max(quantities)
-
-    if buy_buttons and parse_stock(soup):
-        return 1
+    distinct_quantities = sorted(set(quantities))
+    if len(distinct_quantities) >= 2:
+        return max(distinct_quantities)
 
     return None
 

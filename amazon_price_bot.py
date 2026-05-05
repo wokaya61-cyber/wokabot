@@ -71,6 +71,7 @@ class ProductInfo:
     coupon_exists: bool
     coupon_text: str
     in_stock: bool
+    max_quantity: int | None
 
 
 def load_data() -> dict[str, list[dict[str, Any]]]:
@@ -432,6 +433,40 @@ def parse_stock(soup: BeautifulSoup) -> bool:
     return True
 
 
+def parse_max_quantity(soup: BeautifulSoup) -> int | None:
+    quantities: list[int] = []
+
+    for selector in ["#quantity", "select[name='quantity']"]:
+        for option in soup.select(f"{selector} option"):
+            value = option.get("value") or option.get_text(" ", strip=True)
+            match = re.search(r"\d+", str(value))
+            if match:
+                quantities.append(int(match.group(0)))
+
+    for element in soup.select("[data-quantity], [data-a-selector='quantity']"):
+        for value in element.attrs.values():
+            match = re.search(r"\d+", str(value))
+            if match:
+                quantities.append(int(match.group(0)))
+
+    if quantities:
+        return max(quantities)
+
+    page_text = " ".join(soup.get_text(" ", strip=True).split())
+    patterns = [
+        r"(?:en fazla|maksimum|max)\s*(\d{1,3})\s*(?:adet|tane)",
+        r"(?:adet|miktar).{0,40}?(?:en fazla|maksimum|max)\s*(\d{1,3})",
+        r"(\d{1,3})\s*(?:adet|tane).{0,40}?(?:satın alabilirsiniz|alinabilir|alabilirsiniz)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, page_text, re.I)
+        if match:
+            return int(match.group(1))
+
+    return None
+
+
 def normalize_promo_text(text: str) -> str:
     replacements = str.maketrans(
         {
@@ -595,6 +630,7 @@ def parse_product_html(html: str) -> ProductInfo | None:
         coupon_exists=coupon_exists,
         coupon_text=coupon_text,
         in_stock=parse_stock(soup),
+        max_quantity=parse_max_quantity(soup),
     )
 
 
@@ -639,6 +675,12 @@ def format_money(value: Decimal | str | float | int | None) -> str:
     except InvalidOperation:
         return "?"
     return f"{decimal:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def max_quantity_line(info: ProductInfo) -> str:
+    if info.max_quantity:
+        return f"🛒 Maksimum adet: {info.max_quantity}"
+    return "🛒 Maksimum adet: okunamadı"
 
 
 def calculate_drop(old_price: Decimal, new_price: Decimal) -> Decimal:
@@ -826,6 +868,7 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"📦 {info.title}\n\n"
         f"💰 Fiyat: {format_money(info.price)} TL\n\n"
         f"{coupon_line}\n\n"
+        f"{max_quantity_line(info)}\n\n"
         f"🎯 Bildirim eşiği: %{drop_percent}\n\n"
         f"🔗 {url}"
     )
@@ -1029,6 +1072,7 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
             f"📦 {info.title}\n\n"
             f"💰 Başlangıç fiyatı: {format_money(current_price)} TL\n\n"
             f"{coupon_line}\n\n"
+            f"{max_quantity_line(info)}\n\n"
             f"🎯 Bildirim eşiği: %{drop_percent}",
             url,
         )
@@ -1045,7 +1089,8 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
             f"📦 {info.title}\n"
             f"💸 Eski fiyat: {format_money(old_price)} TL\n"
             f"💰 Yeni fiyat: {format_money(current_price)} TL\n"
-            f"📉 Düşüş: %{drop:.2f}",
+            f"📉 Düşüş: %{drop:.2f}\n"
+            f"{max_quantity_line(info)}",
             url,
         )
         product["base_price"] = str(current_price)
@@ -1057,7 +1102,8 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
             chat_id,
             "🎟️ Kupon bulundu\n\n"
             f"📦 {info.title}\n"
-            f"🧾 {info.coupon_text}",
+            f"🧾 {info.coupon_text}\n"
+            f"{max_quantity_line(info)}",
             url,
         )
         product["coupon_notified"] = True

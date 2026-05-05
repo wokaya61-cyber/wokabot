@@ -27,10 +27,12 @@ DATA_FILE = Path(os.getenv("DATA_FILE", "products.json"))
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "20"))
 HTTP_RETRIES = int(os.getenv("HTTP_RETRIES", "3"))
 MIN_PRODUCT_DELAY = int(os.getenv("MIN_PRODUCT_DELAY", "3"))
+ACTIVE_CHECK_SECONDS = int(os.getenv("ACTIVE_CHECK_SECONDS", "60"))
 PENDING_RETRY_SECONDS = int(os.getenv("PENDING_RETRY_SECONDS", "10"))
 CAPTCHA_BACKOFF_SECONDS = int(os.getenv("CAPTCHA_BACKOFF_SECONDS", "30"))
 MAX_BACKOFF_SECONDS = int(os.getenv("MAX_BACKOFF_SECONDS", "60"))
 MAX_CONCURRENT_CHECKS = int(os.getenv("MAX_CONCURRENT_CHECKS", "3"))
+MAX_CHECKS_PER_CYCLE = int(os.getenv("MAX_CHECKS_PER_CYCLE", "50"))
 
 AMAZON_HOSTS = {"amazon.com.tr", "www.amazon.com.tr"}
 RETRY_HTTP_STATUSES = {500, 502, 504}
@@ -179,7 +181,7 @@ def set_backoff(product: dict[str, Any], reason: str) -> None:
 
 def clear_backoff(product: dict[str, Any]) -> None:
     product["failure_count"] = 0
-    product["next_check_at"] = now_ts() + MIN_PRODUCT_DELAY + random.randint(0, 7)
+    product["next_check_at"] = now_ts() + max(MIN_PRODUCT_DELAY, ACTIVE_CHECK_SECONDS) + random.randint(0, 10)
     product["last_error"] = ""
 
 
@@ -1072,11 +1074,19 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
 async def check_all_products(app: Application, manual_chat_id: str | None = None) -> None:
     async with data_lock:
         chat_ids = [manual_chat_id] if manual_chat_id else list(products.keys())
-        targets = [
-            (chat_id, product)
-            for chat_id in chat_ids
-            for product in products.get(chat_id, [])
-        ]
+        all_targets = []
+        for chat_id in chat_ids:
+            for product in products.get(chat_id, []):
+                if product.get("disabled"):
+                    continue
+
+                clamp_next_check(product)
+                next_check_at = int(product.get("next_check_at", 0) or 0)
+                if manual_chat_id or next_check_at <= now_ts():
+                    all_targets.append((next_check_at, chat_id, product))
+
+        all_targets.sort(key=lambda item: item[0])
+        targets = [(chat_id, product) for _, chat_id, product in all_targets[:MAX_CHECKS_PER_CYCLE]]
 
     if not targets:
         return

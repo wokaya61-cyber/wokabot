@@ -356,6 +356,10 @@ def parse_price(soup: BeautifulSoup, html: str = "") -> Decimal | None:
         "#corePriceDisplay_desktop_feature_div",
         "#corePriceDisplay_mobile_feature_div",
         "#corePrice_feature_div",
+        "#corePrice_desktop",
+        "#rightCol",
+        "#centerCol",
+        "#ppd",
     ]
 
     for selector in price_containers:
@@ -372,6 +376,10 @@ def parse_price(soup: BeautifulSoup, html: str = "") -> Decimal | None:
         ".priceToPay .a-offscreen",
         "#corePriceDisplay_desktop_feature_div span[data-a-color='price'] .a-offscreen",
         "#corePriceDisplay_mobile_feature_div span[data-a-color='price'] .a-offscreen",
+        "#corePrice_desktop .a-price .a-offscreen",
+        "#rightCol .a-price .a-offscreen",
+        "#centerCol .priceToPay .a-offscreen",
+        "#ppd .priceToPay .a-offscreen",
         "#priceblock_dealprice",
         "#priceblock_ourprice",
         "#price_inside_buybox",
@@ -785,6 +793,7 @@ def build_headers(user_agent: str) -> dict[str, str]:
 def fetch_product_info(url: str) -> ProductInfo | None:
     errors: list[str] = []
     blocked_errors: list[str] = []
+    fallback_info: ProductInfo | None = None
     candidates = [
         (url, random.choice(USER_AGENTS)),
         (mobile_amazon_url(url), random.choice(MOBILE_USER_AGENTS)),
@@ -799,12 +808,17 @@ def fetch_product_info(url: str) -> ProductInfo | None:
                 return info
 
             if info:
+                if fallback_info is None or (info.seller_ok and not fallback_info.seller_ok):
+                    fallback_info = info
                 errors.append(f"{candidate_url}: fiyat yok")
         except AmazonBlockedError as exc:
             blocked_errors.append(f"{candidate_url}: {exc}")
             continue
         except Exception as exc:
             errors.append(f"{candidate_url}: {exc}")
+
+    if fallback_info:
+        return fallback_info
 
     if errors:
         raise AmazonReadError(" / ".join(errors[-2:]))

@@ -877,6 +877,9 @@ def product_label(product: dict[str, Any]) -> str:
 def product_status_line(product: dict[str, Any]) -> str:
     clamp_next_check(product)
 
+    if product.get("waiting_for_amazon_seller"):
+        return "⏳ Amazon.com.tr saticisi bekleniyor"
+
     if product.get("pending_initial_price"):
         if product.get("last_error") == "Amazon saticisi bekleniyor":
             return "⏳ Amazon.com.tr saticisi bekleniyor"
@@ -924,6 +927,7 @@ async def add_pending_product(chat_id: str, url: str, drop_percent: Decimal, rea
         "first_drop_notified": False,
         "last_notified_price": "",
         "price_rebounded_after_alert": False,
+        "waiting_for_amazon_seller": reason == "amazon_seller_wait",
         "coupon_notified": False,
         "last_coupon_text": "",
         "pending_initial_price": True,
@@ -1018,12 +1022,50 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if not info.seller_ok:
         seller = f"\nSatici bilgisi: {info.seller_text}" if info.seller_text else ""
-        await add_pending_product(chat_id, url, drop_percent, "amazon_seller_wait", info.title)
+        if not info.price:
+            await add_pending_product(chat_id, url, drop_percent, "amazon_seller_wait", info.title)
+            await update.message.reply_text(
+                "⏳ Urun takip listesine eklendi.\n\n"
+                f"📦 {info.title}\n"
+                "Satici su an amazon.com.tr gorunmuyor ve fiyat okunamadi. "
+                "Bot Amazon satmaya baslayinca fiyati okuyup takibi aktif edecek."
+                f"{seller}"
+            )
+            return
+
+        async with data_lock:
+            chat_products = products.setdefault(chat_id, [])
+            chat_products.append(
+                {
+                    "url": url,
+                    "title": info.title,
+                    "base_price": str(info.price),
+                    "last_price": str(info.price),
+                    "drop_percent": str(drop_percent),
+                    "first_drop_notified": False,
+                    "last_notified_price": "",
+                    "price_rebounded_after_alert": False,
+                    "coupon_notified": False,
+                    "last_coupon_text": "",
+                    "waiting_for_amazon_seller": True,
+                    "pending_initial_price": False,
+                    "seller_ok": False,
+                    "page_max_quantity": info.max_quantity,
+                    "failure_count": 0,
+                    "last_error": "Amazon saticisi bekleniyor",
+                    "next_check_at": now_ts() + MIN_PRODUCT_DELAY,
+                    "created_at": int(time.time()),
+                }
+            )
+            save_data(products)
+
         await update.message.reply_text(
             "⏳ Urun takip listesine eklendi.\n\n"
-            f"📦 {info.title}\n"
+            f"📦 {info.title}\n\n"
+            f"💰 Başlangıç fiyatı: {format_money(info.price)} TL\n\n"
             "Satici su an amazon.com.tr gorunmedigi icin fiyat/kupon takibi baslatilmadi. "
-            "Bot kontrollerde once saticiya bakacak; Amazon satmaya baslayinca baslangic fiyatini kaydedip takibi aktif edecek."
+            "Bu fiyat baz fiyat olarak kaydedildi. Bot kontrollerde once saticiya bakacak; "
+            "Amazon satmaya baslayinca haber verecek ve dusus esigini bu baz fiyata gore hesaplayacak."
             f"{seller}"
         )
         return
@@ -1184,7 +1226,7 @@ async def product_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         product["last_notified_price"] = ""
         product["price_rebounded_after_alert"] = False
         product["pending_initial_price"] = False
-        product["last_error"] = ""
+        product["last_error"] = "Amazon saticisi bekleniyor" if product.get("waiting_for_amazon_seller") else ""
         save_data(products)
 
     await update.message.reply_text(
@@ -1283,7 +1325,9 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
     if not info.seller_ok:
         product["seller_ok"] = False
         product["last_error"] = "Amazon saticisi bekleniyor"
-        product["pending_initial_price"] = True
+        product["waiting_for_amazon_seller"] = True
+        if not product.get("base_price"):
+            product["pending_initial_price"] = True
         return
 
     product["seller_ok"] = True
@@ -1296,6 +1340,7 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
     initial_drop_percent = Decimal(str(product.get("drop_percent", "0")))
     drop_percent = FOLLOWUP_DROP_PERCENT if product.get("first_drop_notified") else initial_drop_percent
     product["page_max_quantity"] = info.max_quantity
+    amazon_seller_started = bool(product.get("waiting_for_amazon_seller"))
 
     if product.get("pending_initial_price") or not product.get("base_price"):
         cart_max_quantity = await get_cached_or_probe_cart_quantity(product, url, info)
@@ -1303,6 +1348,7 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         product["first_drop_notified"] = False
         product["last_price"] = str(current_price)
         product["pending_initial_price"] = False
+        product["waiting_for_amazon_seller"] = False
         product["coupon_notified"] = info.coupon_exists
         product["last_coupon_text"] = info.coupon_text
         product["in_stock"] = info.in_stock
@@ -1321,6 +1367,23 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
             url,
         )
         return
+
+    if amazon_seller_started:
+        cart_max_quantity = await get_cached_or_probe_cart_quantity(product, url, info)
+        product["waiting_for_amazon_seller"] = False
+        product["last_error"] = ""
+        await notify(
+            app,
+            chat_id,
+            "✅ Amazon.com.tr satmaya başladı\n\n"
+            f"📦 {info.title}\n\n"
+            f"💰 Amazon fiyatı: {format_money(current_price)} TL\n"
+            f"💸 Baz fiyat: {format_money(product.get('base_price'))} TL\n\n"
+            f"🎯 İlk bildirim eşiği: %{initial_drop_percent}\n\n"
+            f"{max_quantity_line(info, cart_max_quantity)}\n\n"
+            f"🔗 {url}",
+            url,
+        )
 
     old_price = Decimal(str(product.get("base_price") or product.get("last_price") or info.price))
     drop = calculate_drop(old_price, current_price)

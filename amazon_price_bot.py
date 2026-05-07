@@ -143,6 +143,8 @@ def money_to_decimal(value: str) -> Decimal | None:
         parts = value.split(".")
         if len(parts) > 2:
             value = "".join(parts)
+        elif len(parts) == 2 and len(parts[1]) == 3:
+            value = "".join(parts)
 
     try:
         return Decimal(value)
@@ -894,7 +896,7 @@ async def notify(app: Application, chat_id: str, text: str, url: str) -> None:
         chat_id=int(chat_id),
         text=text,
         reply_markup=InlineKeyboardMarkup(keyboard),
-        disable_web_page_preview=True,
+        disable_web_page_preview=False,
     )
 
 
@@ -906,6 +908,8 @@ async def add_pending_product(chat_id: str, url: str, drop_percent: Decimal, rea
         "last_price": "",
         "drop_percent": str(drop_percent),
         "first_drop_notified": False,
+        "last_notified_price": "",
+        "price_rebounded_after_alert": False,
         "coupon_notified": False,
         "last_coupon_text": "",
         "pending_initial_price": True,
@@ -933,6 +937,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/add LINK YUZDE - Ürün ekler\n"
         "/remove LINK veya SIRA_NO - Ürün siler\n"
         "/setdrop LINK veya SIRA_NO YUZDE - Bildirim yüzdesini değiştirir\n"
+        "/productupdate LINK veya SIRA_NO YENI_FIYAT YUZDE - Baz fiyat ve ilk esigi gunceller\n"
         "/list - Takip listesini gösterir\n"
         "/check - Elle kontrol başlatır\n\n"
         "Örnek:\n"
@@ -1030,6 +1035,8 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "last_price": str(info.price),
                 "drop_percent": str(drop_percent),
                 "first_drop_notified": False,
+                "last_notified_price": "",
+                "price_rebounded_after_alert": False,
                 "coupon_notified": info.coupon_exists,
                 "last_coupon_text": info.coupon_text,
                 "page_max_quantity": info.max_quantity,
@@ -1125,6 +1132,55 @@ async def set_drop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await update.message.reply_text(f"🎯 Bildirim eşiği güncellendi: %{drop_percent}")
 
+
+async def product_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+
+    if len(context.args) < 3:
+        await update.message.reply_text("Kullanım: /productupdate LINK veya SIRA_NO YENI_FIYAT YUZDE")
+        return
+
+    try:
+        new_base_price = money_to_decimal(context.args[1])
+        drop_percent = parse_percent(context.args[2])
+    except InvalidOperation:
+        await update.message.reply_text("Fiyat veya yüzde değeri hatalı.")
+        return
+
+    if not new_base_price or new_base_price <= 0:
+        await update.message.reply_text("Yeni baz fiyat 0'dan büyük olmalı.")
+        return
+
+    if drop_percent <= 0:
+        await update.message.reply_text("Yüzde değeri 0'dan büyük olmalı.")
+        return
+
+    async with data_lock:
+        chat_products = products.get(chat_id, [])
+        found = find_product(chat_products, context.args[0])
+        if not found:
+            await update.message.reply_text("Ürün bulunamadı.")
+            return
+
+        _, product = found
+        product["base_price"] = str(new_base_price)
+        product["last_price"] = str(new_base_price)
+        product["drop_percent"] = str(drop_percent)
+        product["first_drop_notified"] = False
+        product["last_notified_price"] = ""
+        product["price_rebounded_after_alert"] = False
+        product["pending_initial_price"] = False
+        product["last_error"] = ""
+        save_data(products)
+
+    await update.message.reply_text(
+        "✅ Ürün takip bilgisi güncellendi.\n\n"
+        f"📦 {product_label(product)}\n\n"
+        f"💰 Yeni baz fiyat: {format_money(new_base_price)} TL\n\n"
+        f"🎯 İlk bildirim eşiği: %{drop_percent}\n"
+        f"Sonraki fiyat düşüş eşiği: %{FOLLOWUP_DROP_PERCENT}\n\n"
+        f"🔗 {product.get('url', '')}"
+    )
 
 async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = str(update.effective_chat.id)
@@ -1254,23 +1310,38 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
 
     old_price = Decimal(str(product.get("base_price") or product.get("last_price") or info.price))
     drop = calculate_drop(old_price, current_price)
+    last_notified_price = money_to_decimal(str(product.get("last_notified_price", "")))
 
-    if drop >= drop_percent:
+    if last_notified_price and current_price > last_notified_price:
+        product["price_rebounded_after_alert"] = True
+
+    returned_to_last_alert = bool(
+        product.get("first_drop_notified")
+        and product.get("price_rebounded_after_alert")
+        and last_notified_price
+        and current_price <= last_notified_price
+    )
+
+    if drop >= drop_percent or returned_to_last_alert:
         cart_max_quantity = await get_cached_or_probe_cart_quantity(product, url, info)
+        alert_title = "🔥 Fiyat düştü" if not returned_to_last_alert else "🔥 Fiyat tekrar alarm seviyesine düştü"
         await notify(
             app,
             chat_id,
-            "🔥 Fiyat düştü\n\n"
-            f"📦 {info.title}\n"
-            f"💸 Eski fiyat: {format_money(old_price)} TL\n"
+            f"{alert_title}\n\n"
+            f"📦 {info.title}\n\n"
             f"💰 Yeni fiyat: {format_money(current_price)} TL\n"
-            f"📉 Düşüş: %{drop:.2f}\n"
-            f"Sonraki fiyat dusus esigi: %{FOLLOWUP_DROP_PERCENT}\n"
-            f"{max_quantity_line(info, cart_max_quantity)}",
+            f"💸 Eski fiyat: {format_money(old_price)} TL\n"
+            f"📉 Düşüş: %{drop:.2f}\n\n"
+            f"🎯 Sonraki fiyat düşüş eşiği: %{FOLLOWUP_DROP_PERCENT}\n\n"
+            f"{max_quantity_line(info, cart_max_quantity)}\n\n"
+            f"🔗 {url}",
             url,
         )
         product["base_price"] = str(current_price)
         product["first_drop_notified"] = True
+        product["last_notified_price"] = str(current_price)
+        product["price_rebounded_after_alert"] = False
 
     last_coupon_text = product.get("last_coupon_text", "")
     if info.coupon_exists and info.coupon_text != last_coupon_text:
@@ -1278,10 +1349,11 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         await notify(
             app,
             chat_id,
-            "🎟️ Kupon bulundu\n\n"
-            f"📦 {info.title}\n"
-            f"🧾 {info.coupon_text}\n"
-            f"{max_quantity_line(info, cart_max_quantity)}",
+            f"🎟️ Kupon bulundu: {info.coupon_text}\n\n"
+            f"📦 {info.title}\n\n"
+            f"💰 Ürün fiyatı: {format_money(current_price)} TL\n\n"
+            f"{max_quantity_line(info, cart_max_quantity)}\n\n"
+            f"🔗 {url}",
             url,
         )
         product["coupon_notified"] = True
@@ -1375,6 +1447,7 @@ def main() -> None:
     app.add_handler(CommandHandler("add", add_product))
     app.add_handler(CommandHandler("remove", remove_product))
     app.add_handler(CommandHandler("setdrop", set_drop))
+    app.add_handler(CommandHandler("productupdate", product_update))
     app.add_handler(CommandHandler("list", list_products))
     app.add_handler(CommandHandler("check", check_command))
     app.add_error_handler(error_handler)

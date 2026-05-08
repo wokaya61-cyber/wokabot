@@ -1533,10 +1533,14 @@ async def check_all_products(app: Application, manual_chat_id: str | None = None
         async with semaphore:
             await check_product(app, chat_id, product)
 
-    await asyncio.gather(
-        *(run_one(chat_id, product) for chat_id, product in targets),
-        return_exceptions=True,
-    )
+    try:
+        await asyncio.gather(
+            *(run_one(chat_id, product) for chat_id, product in targets),
+            return_exceptions=True,
+        )
+    except asyncio.CancelledError:
+        logger.info("Product check cycle cancelled.")
+        raise
 
     async with data_lock:
         save_data(products)
@@ -1546,10 +1550,17 @@ async def background_checker(app: Application) -> None:
     while True:
         try:
             await check_all_products(app)
+        except asyncio.CancelledError:
+            logger.info("Background checker stopped.")
+            break
         except Exception:
             logger.exception("Background checker crashed during a cycle")
 
-        await asyncio.sleep(CHECK_INTERVAL)
+        try:
+            await asyncio.sleep(CHECK_INTERVAL)
+        except asyncio.CancelledError:
+            logger.info("Background checker stopped.")
+            break
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

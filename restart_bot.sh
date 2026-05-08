@@ -3,7 +3,19 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-pkill -f amazon_price_bot.py 2>/dev/null || true
+if pgrep -f amazon_price_bot.py >/dev/null 2>&1; then
+  pkill -TERM -f amazon_price_bot.py 2>/dev/null || true
+
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if ! pgrep -f amazon_price_bot.py >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+
+  pkill -KILL -f amazon_price_bot.py 2>/dev/null || true
+fi
+
 git pull origin main
 
 if [ ! -d "venv" ]; then

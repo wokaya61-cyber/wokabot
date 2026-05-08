@@ -928,6 +928,7 @@ async def add_pending_product(chat_id: str, url: str, drop_percent: Decimal, rea
         "last_notified_price": "",
         "price_rebounded_after_alert": False,
         "waiting_for_amazon_seller": reason == "amazon_seller_wait",
+        "amazon_wait_started_from_add": reason == "amazon_seller_wait",
         "coupon_notified": False,
         "last_coupon_text": "",
         "pending_initial_price": True,
@@ -1048,6 +1049,7 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     "coupon_notified": False,
                     "last_coupon_text": "",
                     "waiting_for_amazon_seller": True,
+                    "amazon_wait_started_from_add": True,
                     "pending_initial_price": False,
                     "seller_ok": False,
                     "page_max_quantity": info.max_quantity,
@@ -1325,8 +1327,9 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
     if not info.seller_ok:
         product["seller_ok"] = False
         product["last_error"] = "Amazon saticisi bekleniyor"
-        product["waiting_for_amazon_seller"] = True
         if not product.get("base_price"):
+            product["waiting_for_amazon_seller"] = True
+            product["amazon_wait_started_from_add"] = True
             product["pending_initial_price"] = True
         return
 
@@ -1340,7 +1343,14 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
     initial_drop_percent = Decimal(str(product.get("drop_percent", "0")))
     drop_percent = FOLLOWUP_DROP_PERCENT if product.get("first_drop_notified") else initial_drop_percent
     product["page_max_quantity"] = info.max_quantity
-    amazon_seller_started = bool(product.get("waiting_for_amazon_seller"))
+    amazon_seller_started = bool(
+        product.get("waiting_for_amazon_seller")
+        and product.get("amazon_wait_started_from_add")
+    )
+    if product.get("waiting_for_amazon_seller") and not amazon_seller_started:
+        product["waiting_for_amazon_seller"] = False
+        product["amazon_wait_started_from_add"] = False
+        product["last_error"] = ""
 
     if product.get("pending_initial_price") or not product.get("base_price"):
         cart_max_quantity = await get_cached_or_probe_cart_quantity(product, url, info)
@@ -1349,6 +1359,7 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         product["last_price"] = str(current_price)
         product["pending_initial_price"] = False
         product["waiting_for_amazon_seller"] = False
+        product["amazon_wait_started_from_add"] = False
         product["coupon_notified"] = info.coupon_exists
         product["last_coupon_text"] = info.coupon_text
         product["in_stock"] = info.in_stock
@@ -1371,6 +1382,7 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
     if amazon_seller_started:
         cart_max_quantity = await get_cached_or_probe_cart_quantity(product, url, info)
         product["waiting_for_amazon_seller"] = False
+        product["amazon_wait_started_from_add"] = False
         product["last_error"] = ""
         await notify(
             app,

@@ -31,8 +31,16 @@ ACTIVE_CHECK_SECONDS = int(os.getenv("ACTIVE_CHECK_SECONDS", "60"))
 PENDING_RETRY_SECONDS = int(os.getenv("PENDING_RETRY_SECONDS", "10"))
 CAPTCHA_BACKOFF_SECONDS = int(os.getenv("CAPTCHA_BACKOFF_SECONDS", "30"))
 MAX_BACKOFF_SECONDS = int(os.getenv("MAX_BACKOFF_SECONDS", "60"))
-MAX_CONCURRENT_CHECKS = int(os.getenv("MAX_CONCURRENT_CHECKS", "3"))
-MAX_CHECKS_PER_CYCLE = int(os.getenv("MAX_CHECKS_PER_CYCLE", "50"))
+MAX_CONCURRENT_CHECKS = min(
+    int(os.getenv("MAX_CONCURRENT_CHECKS", "2")),
+    int(os.getenv("MAX_CONCURRENT_CHECKS_CAP", "2")),
+)
+MAX_CHECKS_PER_CYCLE = min(
+    int(os.getenv("MAX_CHECKS_PER_CYCLE", "8")),
+    int(os.getenv("MAX_CHECKS_PER_CYCLE_CAP", "8")),
+)
+AMAZON_ERROR_BURST_LIMIT = int(os.getenv("AMAZON_ERROR_BURST_LIMIT", "5"))
+AMAZON_GLOBAL_BACKOFF_SECONDS = int(os.getenv("AMAZON_GLOBAL_BACKOFF_SECONDS", "180"))
 FOLLOWUP_DROP_PERCENT = Decimal(os.getenv("FOLLOWUP_DROP_PERCENT", "1"))
 
 AMAZON_HOSTS = {"amazon.com.tr", "www.amazon.com.tr"}
@@ -107,6 +115,8 @@ def save_data(data: dict[str, list[dict[str, Any]]]) -> None:
 
 products = load_data()
 data_lock = asyncio.Lock()
+amazon_error_burst = 0
+amazon_cooldown_until = 0
 
 
 def clean_amazon_url(url: str) -> str:
@@ -158,6 +168,30 @@ def parse_percent(value: str) -> Decimal:
 
 def now_ts() -> int:
     return int(time.time())
+
+
+def amazon_cooldown_remaining() -> int:
+    return max(0, amazon_cooldown_until - now_ts())
+
+
+def register_amazon_error(reason: str) -> None:
+    global amazon_error_burst, amazon_cooldown_until
+
+    amazon_error_burst += 1
+    if amazon_error_burst >= AMAZON_ERROR_BURST_LIMIT:
+        amazon_cooldown_until = now_ts() + AMAZON_GLOBAL_BACKOFF_SECONDS + random.randint(0, 30)
+        logger.warning(
+            "Amazon global cooldown started for %s seconds after %s consecutive errors. Last reason: %s",
+            amazon_cooldown_remaining(),
+            amazon_error_burst,
+            reason,
+        )
+        amazon_error_burst = 0
+
+
+def register_amazon_success() -> None:
+    global amazon_error_burst
+    amazon_error_burst = 0
 
 
 def is_due(product: dict[str, Any]) -> bool:
@@ -1287,6 +1321,12 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
     if product.get("disabled"):
         return
 
+    cooldown = amazon_cooldown_remaining()
+    if cooldown:
+        product["next_check_at"] = now_ts() + cooldown + random.randint(0, 30)
+        product["last_error"] = f"Amazon molasi: {cooldown} sn"
+        return
+
     if not is_due(product):
         return
 
@@ -1294,6 +1334,7 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         info = await scrape(url)
     except AmazonBlockedError as exc:
         set_backoff(product, "captcha")
+        register_amazon_error("captcha")
         logger.warning(
             "Amazon blocked check for %s. Backoff until %s: %s",
             url,
@@ -1304,23 +1345,28 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
     except HTTPError as exc:
         set_backoff(product, "http_error")
         product["last_error"] = str(exc)
+        register_amazon_error("http_error")
         logger.warning("HTTP error for %s: %s", url, exc)
         return
     except AmazonReadError as exc:
         set_backoff(product, "timeout")
         product["last_error"] = str(exc)
+        register_amazon_error("read_error")
         logger.warning("Read timeout for %s: %s", url, exc)
         return
     except Exception as exc:
         set_backoff(product, "read_error")
         product["last_error"] = str(exc)
+        register_amazon_error("read_error")
         logger.warning("Check failed for %s: %s", url, exc)
         return
 
     if not info:
         set_backoff(product, "empty_product")
+        register_amazon_error("empty_product")
         return
 
+    register_amazon_success()
     product["title"] = info.title
     clear_backoff(product)
 
@@ -1457,6 +1503,11 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
 
 
 async def check_all_products(app: Application, manual_chat_id: str | None = None) -> None:
+    cooldown = amazon_cooldown_remaining()
+    if cooldown:
+        logger.warning("Skipping product check cycle during Amazon cooldown: %s seconds remaining", cooldown)
+        return
+
     async with data_lock:
         chat_ids = [manual_chat_id] if manual_chat_id else list(products.keys())
         all_targets = []

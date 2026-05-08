@@ -658,7 +658,23 @@ def normalize_promo_text(text: str) -> str:
             "Ç": "c",
         }
     )
-    return " ".join(text.translate(replacements).casefold().split())
+    turkish_replacements = str.maketrans(
+        {
+            "ı": "i",
+            "İ": "i",
+            "ğ": "g",
+            "Ğ": "g",
+            "ü": "u",
+            "Ü": "u",
+            "ş": "s",
+            "Ş": "s",
+            "ö": "o",
+            "Ö": "o",
+            "ç": "c",
+            "Ç": "c",
+        }
+    )
+    return " ".join(text.translate(turkish_replacements).translate(replacements).casefold().split())
 
 
 def promotion_match(text: str) -> str:
@@ -728,10 +744,33 @@ def parse_coupon(soup: BeautifulSoup) -> tuple[bool, str]:
                 if matched_text:
                     candidates.append(matched_text)
 
+    body_text = " ".join(soup.get_text(" ", strip=True).split())
+    normalized_body = normalize_promo_text(body_text)
+    body_patterns = [
+        r"odeme.{0,60}?(?:esnasinda|sirasinda).{0,80}?(?:\d{1,5}(?:[.,]\d{1,2})?\s*tl|%\s*\d{1,2}).{0,80}?(?:tasarruf|indirim).{0,40}?(?:edin)?",
+        r"(?:kupon|kuponu).{0,80}?(?:\d{1,5}(?:[.,]\d{1,2})?\s*tl|%\s*\d{1,2}).{0,80}?(?:uygula|kazan|indirim)",
+        r"(?:prime\s*uyelerine\s*ozel|uyelere\s*ozel).{0,80}?(?:\d{1,5}(?:[.,]\d{1,2})?\s*tl|%\s*\d{1,2}).{0,80}?(?:promosyon|indirim|kod)",
+        r"\d+\s*(?:veya)?\s*daha\s*fazla\s*al.{0,80}?%\s*\d{1,2}.{0,80}?indirim\s*kazan",
+    ]
+    for pattern in body_patterns:
+        match = re.search(pattern, normalized_body, re.I)
+        if not match:
+            continue
+        start = max(match.start() - 20, 0)
+        end = min(match.end() + 40, len(body_text))
+        snippet = " ".join(body_text[start:end].split())
+        if snippet:
+            candidates.append(snippet)
+
     if not candidates:
         return False, ""
 
-    coupon_text = min(candidates, key=len)
+    valued_candidates = [
+        text
+        for text in candidates
+        if re.search(r"(?:\d{1,5}(?:[.,]\d{1,2})?\s*tl|%\s*\d{1,2})", normalize_promo_text(text), re.I)
+    ]
+    coupon_text = min(valued_candidates or candidates, key=len)
     return True, coupon_text[:240]
 
 

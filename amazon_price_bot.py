@@ -22,7 +22,10 @@ from telegram.ext import Application, ApplicationBuilder, CommandHandler, Contex
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "10"))
+CHECK_INTERVAL = max(
+    int(os.getenv("CHECK_INTERVAL", "20")),
+    int(os.getenv("CHECK_INTERVAL_MIN", "20")),
+)
 DATA_FILE = Path(os.getenv("DATA_FILE", "products.json"))
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "20"))
 HTTP_RETRIES = int(os.getenv("HTTP_RETRIES", "3"))
@@ -1568,7 +1571,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def post_init(app: Application) -> None:
-    app.create_task(background_checker(app))
+    asyncio.create_task(background_checker(app))
     logger.info("Background checker started. Interval: %s seconds", CHECK_INTERVAL)
 
 

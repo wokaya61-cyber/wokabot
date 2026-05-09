@@ -50,6 +50,8 @@ MANUAL_CHECK_COOLDOWN_SECONDS = int(os.getenv("MANUAL_CHECK_COOLDOWN_SECONDS", "
 AMAZON_ERROR_BURST_LIMIT = int(os.getenv("AMAZON_ERROR_BURST_LIMIT", "3"))
 AMAZON_GLOBAL_BACKOFF_SECONDS = int(os.getenv("AMAZON_GLOBAL_BACKOFF_SECONDS", "300"))
 FOLLOWUP_DROP_PERCENT = Decimal(os.getenv("FOLLOWUP_DROP_PERCENT", "1"))
+PREFER_MOBILE_WEB = os.getenv("PREFER_MOBILE_WEB", "true").casefold() in {"1", "true", "yes", "on"}
+DESKTOP_FALLBACK = os.getenv("DESKTOP_FALLBACK", "true").casefold() in {"1", "true", "yes", "on"}
 
 AMAZON_HOSTS = {"amazon.com.tr", "www.amazon.com.tr"}
 RETRY_HTTP_STATUSES = {500, 502, 504}
@@ -905,10 +907,14 @@ def fetch_product_info(url: str) -> ProductInfo | None:
     errors: list[str] = []
     blocked_errors: list[str] = []
     fallback_info: ProductInfo | None = None
-    candidates = [
-        (url, random.choice(USER_AGENTS)),
-        (mobile_amazon_url(url), random.choice(MOBILE_USER_AGENTS)),
-    ]
+    desktop_candidate = (url, random.choice(USER_AGENTS))
+    mobile_candidate = (mobile_amazon_url(url), random.choice(MOBILE_USER_AGENTS))
+    if PREFER_MOBILE_WEB:
+        candidates = [mobile_candidate]
+        if DESKTOP_FALLBACK:
+            candidates.append(desktop_candidate)
+    else:
+        candidates = [desktop_candidate, mobile_candidate]
 
     for candidate_url, user_agent in candidates:
         try:

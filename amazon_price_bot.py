@@ -454,11 +454,16 @@ def parse_seller(soup: BeautifulSoup) -> tuple[bool, str]:
     selectors = [
         "#merchant-info",
         "#tabular-buybox-container",
+        "#tabular-buybox",
+        "#offerDisplayFeature_feature_div",
+        "#desktop_qualifiedBuyBox",
         "#buybox",
         "#shipsFromSoldByMessage_feature_div",
     ]
     seller_text = first_text(soup, selectors)
+    page_text = " ".join(soup.get_text(" ", strip=True).split())
     compact = seller_text.casefold()
+    page_compact = page_text.casefold()
 
     amazon_markers = [
         "amazon.com.tr tarafından satılır",
@@ -472,10 +477,26 @@ def parse_seller(soup: BeautifulSoup) -> tuple[bool, str]:
         "gönderici amazon.com.tr",
         "gonderici amazon.com.tr",
     ]
+    amazon_markers += [
+        "amazon.com.tr tarafından satılır",
+        "satıcı amazon.com.tr",
+        "amazon.com.tr satıcısından",
+        "satıcı amazon.com.tr iadeler",
+        "gönderici amazon.com.tr",
+    ]
     seller_is_amazon = any(marker in compact for marker in amazon_markers)
     seller_is_amazon = seller_is_amazon or (
         "amazon.com.tr" in compact
         and any(word in compact for word in ["satıcı", "satici", "gönderici", "gonderici"])
+    )
+    seller_is_amazon = seller_is_amazon or (
+        "amazon.com.tr" in compact
+        and any(word in compact for word in ["satıcı", "gönderici"])
+    )
+    seller_is_amazon = seller_is_amazon or (
+        "amazon.com.tr" in page_compact
+        and any(word in page_compact for word in ["satıcı", "satÄ±cÄ±", "satici", "gönderici", "gÃ¶nderici", "gonderici"])
+        and any(word in page_compact for word in ["sepete ekle", "şimdi al", "stokta var", "teslimat"])
     )
     return seller_is_amazon, seller_text or seller_link
 

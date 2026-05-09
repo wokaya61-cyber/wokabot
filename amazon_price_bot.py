@@ -23,8 +23,8 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHECK_INTERVAL = max(
-    int(os.getenv("CHECK_INTERVAL", "20")),
-    int(os.getenv("CHECK_INTERVAL_MIN", "20")),
+    int(os.getenv("CHECK_INTERVAL", "30")),
+    int(os.getenv("CHECK_INTERVAL_MIN", "30")),
 )
 DATA_FILE = Path(os.getenv("DATA_FILE", "products.json"))
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "20"))
@@ -35,15 +35,20 @@ PENDING_RETRY_SECONDS = int(os.getenv("PENDING_RETRY_SECONDS", "10"))
 CAPTCHA_BACKOFF_SECONDS = int(os.getenv("CAPTCHA_BACKOFF_SECONDS", "30"))
 MAX_BACKOFF_SECONDS = int(os.getenv("MAX_BACKOFF_SECONDS", "60"))
 MAX_CONCURRENT_CHECKS = min(
-    int(os.getenv("MAX_CONCURRENT_CHECKS", "2")),
-    int(os.getenv("MAX_CONCURRENT_CHECKS_CAP", "2")),
+    int(os.getenv("MAX_CONCURRENT_CHECKS", "1")),
+    int(os.getenv("MAX_CONCURRENT_CHECKS_CAP", "1")),
 )
 MAX_CHECKS_PER_CYCLE = min(
-    int(os.getenv("MAX_CHECKS_PER_CYCLE", "8")),
-    int(os.getenv("MAX_CHECKS_PER_CYCLE_CAP", "8")),
+    int(os.getenv("MAX_CHECKS_PER_CYCLE", "4")),
+    int(os.getenv("MAX_CHECKS_PER_CYCLE_CAP", "4")),
 )
-AMAZON_ERROR_BURST_LIMIT = int(os.getenv("AMAZON_ERROR_BURST_LIMIT", "5"))
-AMAZON_GLOBAL_BACKOFF_SECONDS = int(os.getenv("AMAZON_GLOBAL_BACKOFF_SECONDS", "180"))
+MANUAL_CHECK_LIMIT = min(
+    int(os.getenv("MANUAL_CHECK_LIMIT", "3")),
+    int(os.getenv("MANUAL_CHECK_LIMIT_CAP", "3")),
+)
+MANUAL_CHECK_COOLDOWN_SECONDS = int(os.getenv("MANUAL_CHECK_COOLDOWN_SECONDS", "60"))
+AMAZON_ERROR_BURST_LIMIT = int(os.getenv("AMAZON_ERROR_BURST_LIMIT", "3"))
+AMAZON_GLOBAL_BACKOFF_SECONDS = int(os.getenv("AMAZON_GLOBAL_BACKOFF_SECONDS", "300"))
 FOLLOWUP_DROP_PERCENT = Decimal(os.getenv("FOLLOWUP_DROP_PERCENT", "1"))
 
 AMAZON_HOSTS = {"amazon.com.tr", "www.amazon.com.tr"}
@@ -120,6 +125,7 @@ products = load_data()
 data_lock = asyncio.Lock()
 amazon_error_burst = 0
 amazon_cooldown_until = 0
+manual_check_last_started: dict[str, int] = {}
 
 
 def clean_amazon_url(url: str) -> str:
@@ -1382,6 +1388,15 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = str(update.effective_chat.id)
+    last_started = manual_check_last_started.get(chat_id, 0)
+    wait_seconds = MANUAL_CHECK_COOLDOWN_SECONDS - (now_ts() - last_started)
+    if wait_seconds > 0:
+        await update.message.reply_text(
+            f"Elle kontrol yakin zamanda baslatildi. Yaklasik {wait_seconds} sn sonra tekrar deneyebilirsin."
+        )
+        return
+
+    manual_check_last_started[chat_id] = now_ts()
     context.application.create_task(check_all_products(context.application, manual_chat_id=chat_id))
     await update.message.reply_text("✅ Elle kontrol arka planda başlatıldı.")
 
@@ -1593,7 +1608,8 @@ async def check_all_products(app: Application, manual_chat_id: str | None = None
                     all_targets.append((next_check_at, chat_id, product))
 
         all_targets.sort(key=lambda item: item[0])
-        targets = [(chat_id, product) for _, chat_id, product in all_targets[:MAX_CHECKS_PER_CYCLE]]
+        cycle_limit = MANUAL_CHECK_LIMIT if manual_chat_id else MAX_CHECKS_PER_CYCLE
+        targets = [(chat_id, product) for _, chat_id, product in all_targets[:cycle_limit]]
 
     if not targets:
         return

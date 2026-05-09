@@ -30,17 +30,17 @@ DATA_FILE = Path(os.getenv("DATA_FILE", "products.json"))
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "20"))
 HTTP_RETRIES = int(os.getenv("HTTP_RETRIES", "3"))
 MIN_PRODUCT_DELAY = int(os.getenv("MIN_PRODUCT_DELAY", "3"))
-ACTIVE_CHECK_SECONDS = int(os.getenv("ACTIVE_CHECK_SECONDS", "60"))
+ACTIVE_CHECK_SECONDS = int(os.getenv("ACTIVE_CHECK_SECONDS", "30"))
 PENDING_RETRY_SECONDS = int(os.getenv("PENDING_RETRY_SECONDS", "10"))
 CAPTCHA_BACKOFF_SECONDS = int(os.getenv("CAPTCHA_BACKOFF_SECONDS", "30"))
 MAX_BACKOFF_SECONDS = int(os.getenv("MAX_BACKOFF_SECONDS", "60"))
 MAX_CONCURRENT_CHECKS = min(
-    int(os.getenv("MAX_CONCURRENT_CHECKS", "1")),
-    int(os.getenv("MAX_CONCURRENT_CHECKS_CAP", "1")),
+    int(os.getenv("MAX_CONCURRENT_CHECKS", "8")),
+    int(os.getenv("MAX_CONCURRENT_CHECKS_CAP", "8")),
 )
 MAX_CHECKS_PER_CYCLE = min(
-    int(os.getenv("MAX_CHECKS_PER_CYCLE", "4")),
-    int(os.getenv("MAX_CHECKS_PER_CYCLE_CAP", "4")),
+    int(os.getenv("MAX_CHECKS_PER_CYCLE", "0")),
+    int(os.getenv("MAX_CHECKS_PER_CYCLE_CAP", "0")),
 )
 MANUAL_CHECK_LIMIT = min(
     int(os.getenv("MANUAL_CHECK_LIMIT", "3")),
@@ -52,6 +52,7 @@ AMAZON_GLOBAL_BACKOFF_SECONDS = int(os.getenv("AMAZON_GLOBAL_BACKOFF_SECONDS", "
 FOLLOWUP_DROP_PERCENT = Decimal(os.getenv("FOLLOWUP_DROP_PERCENT", "1"))
 PREFER_MOBILE_WEB = os.getenv("PREFER_MOBILE_WEB", "true").casefold() in {"1", "true", "yes", "on"}
 DESKTOP_FALLBACK = os.getenv("DESKTOP_FALLBACK", "true").casefold() in {"1", "true", "yes", "on"}
+FULL_SCAN_EACH_CYCLE = os.getenv("FULL_SCAN_EACH_CYCLE", "true").casefold() in {"1", "true", "yes", "on"}
 
 AMAZON_HOSTS = {"amazon.com.tr", "www.amazon.com.tr"}
 RETRY_HTTP_STATUSES = {500, 502, 504}
@@ -1614,8 +1615,14 @@ async def check_all_products(app: Application, manual_chat_id: str | None = None
                     all_targets.append((next_check_at, chat_id, product))
 
         all_targets.sort(key=lambda item: item[0])
-        cycle_limit = MANUAL_CHECK_LIMIT if manual_chat_id else MAX_CHECKS_PER_CYCLE
-        targets = [(chat_id, product) for _, chat_id, product in all_targets[:cycle_limit]]
+        if manual_chat_id:
+            selected_targets = all_targets[:MANUAL_CHECK_LIMIT] if MANUAL_CHECK_LIMIT > 0 else all_targets
+        elif FULL_SCAN_EACH_CYCLE or MAX_CHECKS_PER_CYCLE <= 0:
+            selected_targets = all_targets
+        else:
+            selected_targets = all_targets[:MAX_CHECKS_PER_CYCLE]
+
+        targets = [(chat_id, product) for _, chat_id, product in selected_targets]
 
     if not targets:
         return

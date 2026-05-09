@@ -1668,7 +1668,7 @@ def home() -> str:
 
 
 def run_web() -> None:
-    port = int(os.getenv("PORT", "8000"))
+    port = int(os.getenv("PORT", "8001"))
     app_web.run(host="0.0.0.0", port=port)
 
 

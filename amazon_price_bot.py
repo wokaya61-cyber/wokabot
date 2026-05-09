@@ -448,8 +448,8 @@ def parse_price(soup: BeautifulSoup, html: str = "") -> Decimal | None:
 
 def parse_seller(soup: BeautifulSoup) -> tuple[bool, str]:
     seller_link = first_text(soup, ["#sellerProfileTriggerId"])
-    if seller_link and "amazon.com.tr" in seller_link.casefold():
-        return True, seller_link
+    if seller_link:
+        return "amazon.com.tr" in normalize_promo_text(seller_link), seller_link
 
     selectors = [
         "#merchant-info",
@@ -464,6 +464,14 @@ def parse_seller(soup: BeautifulSoup) -> tuple[bool, str]:
     page_text = " ".join(soup.get_text(" ", strip=True).split())
     compact = seller_text.casefold()
     page_compact = page_text.casefold()
+    strict_compact = normalize_promo_text(seller_text)
+    seller_patterns = [
+        r"amazon\.com\.tr\s+tarafindan\s+satilir",
+        r"satici\s*/?\s*amazon\.com\.tr\b",
+        r"amazon\.com\.tr\s+saticisindan",
+    ]
+    seller_is_amazon = any(re.search(pattern, strict_compact, re.I) for pattern in seller_patterns)
+    return seller_is_amazon, seller_text or seller_link
 
     amazon_markers = [
         "amazon.com.tr tarafından satılır",
@@ -1436,9 +1444,9 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
     if not info.seller_ok:
         product["seller_ok"] = False
         product["last_error"] = "Amazon saticisi bekleniyor"
+        product["waiting_for_amazon_seller"] = True
+        product["amazon_wait_started_from_add"] = True
         if not product.get("base_price"):
-            product["waiting_for_amazon_seller"] = True
-            product["amazon_wait_started_from_add"] = True
             product["pending_initial_price"] = True
         return
 

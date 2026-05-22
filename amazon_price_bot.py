@@ -715,6 +715,10 @@ def normalize_promo_text(text: str) -> str:
     return " ".join(text.translate(turkish_replacements).translate(replacements).casefold().split())
 
 
+def coupon_state_key(text: str) -> str:
+    return normalize_promo_text(text or "")
+
+
 def promotion_match(text: str) -> str:
     normalized = normalize_promo_text(text)
     promo_patterns = [
@@ -1049,6 +1053,8 @@ async def add_pending_product(chat_id: str, url: str, drop_percent: Decimal, rea
         "amazon_wait_started_from_add": reason == "amazon_seller_wait",
         "coupon_notified": False,
         "last_coupon_text": "",
+        "last_coupon_key": "",
+        "amazon_seller_started_notified": False,
         "pending_initial_price": True,
         "failure_count": 0,
         "last_error": reason,
@@ -1166,8 +1172,10 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     "price_rebounded_after_alert": False,
                     "coupon_notified": False,
                     "last_coupon_text": "",
+                    "last_coupon_key": "",
                     "waiting_for_amazon_seller": True,
                     "amazon_wait_started_from_add": True,
+                    "amazon_seller_started_notified": False,
                     "pending_initial_price": False,
                     "seller_ok": False,
                     "page_max_quantity": info.max_quantity,
@@ -1215,6 +1223,8 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "price_rebounded_after_alert": False,
                 "coupon_notified": info.coupon_exists,
                 "last_coupon_text": info.coupon_text,
+                "last_coupon_key": coupon_state_key(info.coupon_text) if info.coupon_exists else "",
+                "amazon_seller_started_notified": True,
                 "page_max_quantity": info.max_quantity,
                 "cart_max_quantity": cart_max_quantity,
                 "cart_max_checked_at": now_ts() if cart_max_quantity else 0,
@@ -1462,12 +1472,16 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
     register_amazon_success()
     product["title"] = info.title
     clear_backoff(product)
+    if "amazon_seller_started_notified" not in product:
+        product["amazon_seller_started_notified"] = bool(product.get("seller_ok")) or not bool(
+            product.get("waiting_for_amazon_seller")
+        )
 
     if not info.seller_ok:
         product["seller_ok"] = False
         product["last_error"] = "Amazon saticisi bekleniyor"
         product["waiting_for_amazon_seller"] = True
-        product["amazon_wait_started_from_add"] = True
+        product["amazon_wait_started_from_add"] = not bool(product.get("amazon_seller_started_notified"))
         if not product.get("base_price"):
             product["pending_initial_price"] = True
         return
@@ -1485,6 +1499,7 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
     amazon_seller_started = bool(
         product.get("waiting_for_amazon_seller")
         and product.get("amazon_wait_started_from_add")
+        and not product.get("amazon_seller_started_notified")
     )
     if product.get("waiting_for_amazon_seller") and not amazon_seller_started:
         product["waiting_for_amazon_seller"] = False
@@ -1501,6 +1516,8 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         product["amazon_wait_started_from_add"] = False
         product["coupon_notified"] = info.coupon_exists
         product["last_coupon_text"] = info.coupon_text
+        product["last_coupon_key"] = coupon_state_key(info.coupon_text) if info.coupon_exists else ""
+        product["amazon_seller_started_notified"] = True
         product["in_stock"] = info.in_stock
 
         coupon_line = f"🎟️ Kupon: {info.coupon_text}" if info.coupon_exists else "❌ Üründe kupon yok"
@@ -1523,6 +1540,11 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         product["waiting_for_amazon_seller"] = False
         product["amazon_wait_started_from_add"] = False
         product["last_error"] = ""
+        product["coupon_notified"] = info.coupon_exists
+        product["last_coupon_text"] = info.coupon_text
+        product["last_coupon_key"] = coupon_state_key(info.coupon_text) if info.coupon_exists else ""
+        product["amazon_seller_started_notified"] = True
+        coupon_line = f"🎟️ Kupon: {info.coupon_text}" if info.coupon_exists else "❌ Üründe kupon yok"
         await notify(
             app,
             chat_id,
@@ -1531,6 +1553,7 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
             f"💰 Amazon fiyatı: {format_money(current_price)} TL\n"
             f"💸 Baz fiyat: {format_money(product.get('base_price'))} TL\n\n"
             f"🎯 İlk bildirim eşiği: %{initial_drop_percent}\n\n"
+            f"{coupon_line}\n\n"
             f"{max_quantity_line(info, cart_max_quantity)}\n\n"
             f"🔗 {url}",
             url,
@@ -1572,7 +1595,9 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         product["price_rebounded_after_alert"] = False
 
     last_coupon_text = product.get("last_coupon_text", "")
-    if info.coupon_exists and info.coupon_text != last_coupon_text:
+    last_coupon_key = product.get("last_coupon_key") or coupon_state_key(last_coupon_text)
+    current_coupon_key = coupon_state_key(info.coupon_text) if info.coupon_exists else ""
+    if info.coupon_exists and current_coupon_key and current_coupon_key != last_coupon_key:
         cart_max_quantity = await get_cached_or_probe_cart_quantity(product, url, info)
         await notify(
             app,
@@ -1586,10 +1611,12 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         )
         product["coupon_notified"] = True
         product["last_coupon_text"] = info.coupon_text
+        product["last_coupon_key"] = current_coupon_key
 
     if not info.coupon_exists:
         product["coupon_notified"] = False
         product["last_coupon_text"] = ""
+        product["last_coupon_key"] = ""
 
     product["last_price"] = str(current_price)
     product["in_stock"] = info.in_stock

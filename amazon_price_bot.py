@@ -179,6 +179,10 @@ def parse_percent(value: str) -> Decimal:
     return Decimal(value.strip().replace("%", "").replace(",", "."))
 
 
+def normalize_price(value: Decimal | str | float | int) -> Decimal:
+    return Decimal(str(value)).quantize(Decimal("0.01"))
+
+
 def now_ts() -> int:
     return int(time.time())
 
@@ -1050,11 +1054,13 @@ async def add_pending_product(chat_id: str, url: str, drop_percent: Decimal, rea
         "first_drop_notified": False,
         "last_notified_price": "",
         "price_rebounded_after_alert": False,
+        "price_rebound_reference_price": "",
         "waiting_for_amazon_seller": reason == "amazon_seller_wait",
         "amazon_wait_started_from_add": reason == "amazon_seller_wait",
         "coupon_notified": False,
         "last_coupon_text": "",
         "last_coupon_key": "",
+        "coupon_missing_count": 0,
         "amazon_seller_started_notified": False,
         "pending_initial_price": True,
         "failure_count": 0,
@@ -1171,9 +1177,11 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     "first_drop_notified": False,
                     "last_notified_price": "",
                     "price_rebounded_after_alert": False,
+                    "price_rebound_reference_price": "",
                     "coupon_notified": False,
                     "last_coupon_text": "",
                     "last_coupon_key": "",
+                    "coupon_missing_count": 0,
                     "waiting_for_amazon_seller": True,
                     "amazon_wait_started_from_add": True,
                     "amazon_seller_started_notified": False,
@@ -1222,9 +1230,11 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "first_drop_notified": False,
                 "last_notified_price": "",
                 "price_rebounded_after_alert": False,
+                "price_rebound_reference_price": "",
                 "coupon_notified": info.coupon_exists,
                 "last_coupon_text": info.coupon_text,
                 "last_coupon_key": coupon_state_key(info.coupon_text) if info.coupon_exists else "",
+                "coupon_missing_count": 0,
                 "amazon_seller_started_notified": True,
                 "page_max_quantity": info.max_quantity,
                 "cart_max_quantity": cart_max_quantity,
@@ -1356,6 +1366,7 @@ async def product_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         product["first_drop_notified"] = False
         product["last_notified_price"] = ""
         product["price_rebounded_after_alert"] = False
+        product["price_rebound_reference_price"] = ""
         product["pending_initial_price"] = False
         product["last_error"] = "Amazon saticisi bekleniyor" if product.get("waiting_for_amazon_seller") else ""
         save_data(products)
@@ -1493,7 +1504,7 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         set_backoff(product, "price_missing")
         return
 
-    current_price = info.price
+    current_price = normalize_price(info.price)
     initial_drop_percent = Decimal(str(product.get("drop_percent", "0")))
     drop_percent = FOLLOWUP_DROP_PERCENT if product.get("first_drop_notified") else initial_drop_percent
     product["page_max_quantity"] = info.max_quantity
@@ -1518,6 +1529,7 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         product["coupon_notified"] = info.coupon_exists
         product["last_coupon_text"] = info.coupon_text
         product["last_coupon_key"] = coupon_state_key(info.coupon_text) if info.coupon_exists else ""
+        product["coupon_missing_count"] = 0
         product["amazon_seller_started_notified"] = True
         product["in_stock"] = info.in_stock
 
@@ -1544,6 +1556,7 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         product["coupon_notified"] = info.coupon_exists
         product["last_coupon_text"] = info.coupon_text
         product["last_coupon_key"] = coupon_state_key(info.coupon_text) if info.coupon_exists else ""
+        product["coupon_missing_count"] = 0
         product["amazon_seller_started_notified"] = True
         coupon_line = f"🎟️ Kupon: {info.coupon_text}" if info.coupon_exists else "❌ Üründe kupon yok"
         await notify(
@@ -1560,30 +1573,46 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
             url,
         )
 
-    old_price = Decimal(str(product.get("base_price") or product.get("last_price") or info.price))
+    old_price = normalize_price(product.get("base_price") or product.get("last_price") or current_price)
     drop = calculate_drop(old_price, current_price)
     last_notified_price = money_to_decimal(str(product.get("last_notified_price", "")))
     last_observed_price = money_to_decimal(str(product.get("last_price", "")))
+    if last_notified_price:
+        last_notified_price = normalize_price(last_notified_price)
+    if last_observed_price:
+        last_observed_price = normalize_price(last_observed_price)
 
     rebound_trigger_price = None
     if last_notified_price:
-        rebound_trigger_price = last_notified_price * (
-            Decimal("1") + (FOLLOWUP_DROP_PERCENT / Decimal("100"))
+        rebound_trigger_price = normalize_price(
+            last_notified_price
+            * (Decimal("1") + (FOLLOWUP_DROP_PERCENT / Decimal("100")))
         )
 
     if rebound_trigger_price and current_price >= rebound_trigger_price:
-        product["price_rebounded_after_alert"] = True
+        product["price_rebound_reference_price"] = str(current_price)
 
+    rebound_reference_price = money_to_decimal(str(product.get("price_rebound_reference_price", "")))
+    if rebound_reference_price:
+        rebound_reference_price = normalize_price(rebound_reference_price)
     returned_to_last_alert = bool(
         product.get("first_drop_notified")
-        and product.get("price_rebounded_after_alert")
+        and rebound_reference_price
+        and rebound_trigger_price
+        and rebound_reference_price >= rebound_trigger_price
         and last_notified_price
         and last_observed_price
         and current_price < last_observed_price
         and current_price <= last_notified_price
     )
 
-    if drop >= drop_percent or returned_to_last_alert:
+    threshold_drop_reached = bool(
+        drop_percent > 0
+        and current_price < old_price
+        and drop >= drop_percent
+    )
+
+    if threshold_drop_reached or returned_to_last_alert:
         cart_max_quantity = await get_cached_or_probe_cart_quantity(product, url, info)
         alert_title = "🔥 Fiyat düştü" if not returned_to_last_alert else "🔥 Fiyat tekrar alarm seviyesine düştü"
         await notify(
@@ -1603,6 +1632,7 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         product["first_drop_notified"] = True
         product["last_notified_price"] = str(current_price)
         product["price_rebounded_after_alert"] = False
+        product["price_rebound_reference_price"] = ""
 
     last_coupon_text = product.get("last_coupon_text", "")
     last_coupon_key = product.get("last_coupon_key") or coupon_state_key(last_coupon_text)
@@ -1622,11 +1652,17 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         product["coupon_notified"] = True
         product["last_coupon_text"] = info.coupon_text
         product["last_coupon_key"] = current_coupon_key
+        product["coupon_missing_count"] = 0
 
     if not info.coupon_exists:
-        product["coupon_notified"] = False
-        product["last_coupon_text"] = ""
-        product["last_coupon_key"] = ""
+        coupon_missing_count = int(product.get("coupon_missing_count", 0) or 0) + 1
+        product["coupon_missing_count"] = coupon_missing_count
+        if coupon_missing_count >= 3:
+            product["coupon_notified"] = False
+            product["last_coupon_text"] = ""
+            product["last_coupon_key"] = ""
+    else:
+        product["coupon_missing_count"] = 0
 
     product["last_price"] = str(current_price)
     product["in_stock"] = info.in_stock

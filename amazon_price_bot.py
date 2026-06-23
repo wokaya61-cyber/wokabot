@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import json
 import logging
 import os
@@ -130,6 +131,55 @@ check_cycle_lock = asyncio.Lock()
 amazon_error_burst = 0
 amazon_cooldown_until = 0
 manual_check_last_started: dict[str, int] = {}
+instance_lock_handle: Any = None
+
+
+def acquire_instance_lock() -> None:
+    global instance_lock_handle
+
+    lock_path = Path(os.getenv("INSTANCE_LOCK_FILE", "/tmp/amazon_price_bot.lock"))
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        handle.close()
+        raise RuntimeError("Amazon botunun başka bir kopyası zaten çalışıyor.")
+
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    instance_lock_handle = handle
+
+
+def release_instance_lock() -> None:
+    global instance_lock_handle
+    if instance_lock_handle is None:
+        return
+
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            instance_lock_handle.seek(0)
+            msvcrt.locking(instance_lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(instance_lock_handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        instance_lock_handle.close()
+        instance_lock_handle = None
 
 
 def clean_amazon_url(url: str) -> str:
@@ -1771,6 +1821,9 @@ def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN ortam değişkeni tanımlı değil.")
 
+    acquire_instance_lock()
+    atexit.register(release_instance_lock)
+
     from threading import Thread
 
     Thread(target=run_web, daemon=True).start()
@@ -1785,7 +1838,7 @@ def main() -> None:
     app.add_handler(CommandHandler("check", check_command))
     app.add_error_handler(error_handler)
 
-    logger.info("Telegram bot started.")
+    logger.info("Telegram bot started. PID=%s", os.getpid())
     app.run_polling()
 
 

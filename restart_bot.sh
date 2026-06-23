@@ -3,20 +3,35 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-if pgrep -f amazon_price_bot.py >/dev/null 2>&1; then
-  pkill -TERM -f amazon_price_bot.py 2>/dev/null || true
+LOCK_FILE="${INSTANCE_LOCK_FILE:-/tmp/amazon_price_bot.lock}"
 
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if ! pgrep -f amazon_price_bot.py >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-  done
-
-  pkill -KILL -f amazon_price_bot.py 2>/dev/null || true
+if [ -f "$LOCK_FILE" ]; then
+  LOCK_PID="$(tr -cd '0-9' < "$LOCK_FILE")"
+  if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
+    kill -TERM "$LOCK_PID" 2>/dev/null || true
+  fi
 fi
 
-rm -f /tmp/amazon_price_bot.lock
+pkill -TERM -f '[a]mazon_price_bot.py' 2>/dev/null || true
+
+for _ in $(seq 1 15); do
+  if ! pgrep -f '[a]mazon_price_bot.py' >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+pkill -KILL -f '[a]mazon_price_bot.py' 2>/dev/null || true
+sleep 2
+
+if pgrep -f '[a]mazon_price_bot.py' >/dev/null 2>&1; then
+  echo "Eski Amazon bot sureci otomatik yeniden basliyor:"
+  pgrep -af '[a]mazon_price_bot.py'
+  echo "Bu sureci baslatan systemd/supervisor servisi durdurulmadan yeni bot baslatilamaz."
+  exit 1
+fi
+
+rm -f "$LOCK_FILE"
 
 git pull origin main
 

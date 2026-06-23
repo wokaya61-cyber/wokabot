@@ -126,6 +126,7 @@ def save_data(data: dict[str, list[dict[str, Any]]]) -> None:
 
 products = load_data()
 data_lock = asyncio.Lock()
+check_cycle_lock = asyncio.Lock()
 amazon_error_burst = 0
 amazon_cooldown_until = 0
 manual_check_last_started: dict[str, int] = {}
@@ -1562,14 +1563,23 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
     old_price = Decimal(str(product.get("base_price") or product.get("last_price") or info.price))
     drop = calculate_drop(old_price, current_price)
     last_notified_price = money_to_decimal(str(product.get("last_notified_price", "")))
+    last_observed_price = money_to_decimal(str(product.get("last_price", "")))
 
-    if last_notified_price and current_price > last_notified_price:
+    rebound_trigger_price = None
+    if last_notified_price:
+        rebound_trigger_price = last_notified_price * (
+            Decimal("1") + (FOLLOWUP_DROP_PERCENT / Decimal("100"))
+        )
+
+    if rebound_trigger_price and current_price >= rebound_trigger_price:
         product["price_rebounded_after_alert"] = True
 
     returned_to_last_alert = bool(
         product.get("first_drop_notified")
         and product.get("price_rebounded_after_alert")
         and last_notified_price
+        and last_observed_price
+        and current_price < last_observed_price
         and current_price <= last_notified_price
     )
 
@@ -1622,7 +1632,7 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
     product["in_stock"] = info.in_stock
 
 
-async def check_all_products(app: Application, manual_chat_id: str | None = None) -> None:
+async def _check_all_products(app: Application, manual_chat_id: str | None = None) -> None:
     cooldown = amazon_cooldown_remaining()
     if cooldown:
         logger.warning("Skipping product check cycle during Amazon cooldown: %s seconds remaining", cooldown)
@@ -1671,6 +1681,15 @@ async def check_all_products(app: Application, manual_chat_id: str | None = None
 
     async with data_lock:
         save_data(products)
+
+
+async def check_all_products(app: Application, manual_chat_id: str | None = None) -> None:
+    if check_cycle_lock.locked():
+        logger.info("Skipping overlapping product check cycle.")
+        return
+
+    async with check_cycle_lock:
+        await _check_all_products(app, manual_chat_id)
 
 
 async def background_checker(app: Application) -> None:

@@ -23,6 +23,7 @@ from telegram.ext import Application, ApplicationBuilder, CommandHandler, Contex
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_VERSION = "2026.06.23-1"
 CHECK_INTERVAL = max(
     int(os.getenv("CHECK_INTERVAL", "30")),
     int(os.getenv("CHECK_INTERVAL_MIN", "30")),
@@ -1094,6 +1095,26 @@ async def notify(app: Application, chat_id: str, text: str, url: str) -> None:
     )
 
 
+async def reserve_notification(
+    chat_id: str,
+    product: dict[str, Any],
+    field: str,
+    signature: str,
+) -> bool:
+    async with data_lock:
+        duplicate_exists = any(
+            item.get(field) == signature
+            for item in products.get(chat_id, [])
+        )
+        if duplicate_exists:
+            logger.info("Suppressed duplicate notification: %s %s", field, signature)
+            return False
+
+        product[field] = signature
+        save_data(products)
+        return True
+
+
 async def add_pending_product(chat_id: str, url: str, drop_percent: Decimal, reason: str, title: str = "") -> bool:
     product = {
         "url": url,
@@ -1139,10 +1160,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/setdrop LINK veya SIRA_NO YUZDE - Bildirim yüzdesini değiştirir\n"
         "/productupdate LINK veya SIRA_NO YENI_FIYAT YUZDE - Baz fiyat ve ilk esigi gunceller\n"
         "/list - Takip listesini gösterir\n"
-        "/check - Elle kontrol başlatır\n\n"
+        "/check - Elle kontrol başlatır\n"
+        "/version - Çalışan bot sürümünü gösterir\n\n"
+        f"Bot sürümü: {BOT_VERSION}\n\n"
         "Örnek:\n"
         "/add https://www.amazon.com.tr/dp/B0BJQP23Y8 15"
     )
+
+
+async def version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(f"Amazon bot sürümü: {BOT_VERSION}")
 
 
 async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1639,7 +1666,12 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
             * (Decimal("1") + (FOLLOWUP_DROP_PERCENT / Decimal("100")))
         )
 
-    if rebound_trigger_price and current_price >= rebound_trigger_price:
+    if (
+        rebound_trigger_price
+        and current_price >= rebound_trigger_price
+        and not product.get("price_rebound_reference_price")
+    ):
+        product["price_rebound_generation"] = int(product.get("price_rebound_generation", 0) or 0) + 1
         product["price_rebound_reference_price"] = str(current_price)
 
     rebound_reference_price = money_to_decimal(str(product.get("price_rebound_reference_price", "")))
@@ -1665,44 +1697,53 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
     if threshold_drop_reached or returned_to_last_alert:
         cart_max_quantity = await get_cached_or_probe_cart_quantity(product, url, info)
         alert_title = "🔥 Fiyat düştü" if not returned_to_last_alert else "🔥 Fiyat tekrar alarm seviyesine düştü"
-        await notify(
-            app,
-            chat_id,
-            f"{alert_title}\n\n"
-            f"📦 {info.title}\n\n"
-            f"💰 Yeni fiyat: {format_money(current_price)} TL\n"
-            f"💸 Eski fiyat: {format_money(old_price)} TL\n"
-            f"📉 Düşüş: %{drop:.2f}\n\n"
-            f"🎯 Sonraki fiyat düşüş eşiği: %{FOLLOWUP_DROP_PERCENT}\n\n"
-            f"{max_quantity_line(info, cart_max_quantity)}\n\n"
-            f"🔗 {url}",
-            url,
+        alert_kind = "return" if returned_to_last_alert else "drop"
+        alert_generation = int(product.get("price_rebound_generation", 0) or 0)
+        alert_signature = (
+            f"{alert_kind}|{url}|{alert_generation}|"
+            f"{old_price:.2f}|{current_price:.2f}"
         )
         product["base_price"] = str(current_price)
         product["first_drop_notified"] = True
         product["last_notified_price"] = str(current_price)
         product["price_rebounded_after_alert"] = False
         product["price_rebound_reference_price"] = ""
+        if await reserve_notification(chat_id, product, "last_price_alert_signature", alert_signature):
+            await notify(
+                app,
+                chat_id,
+                f"{alert_title}\n\n"
+                f"📦 {info.title}\n\n"
+                f"💰 Yeni fiyat: {format_money(current_price)} TL\n"
+                f"💸 Eski fiyat: {format_money(old_price)} TL\n"
+                f"📉 Düşüş: %{drop:.2f}\n\n"
+                f"🎯 Sonraki fiyat düşüş eşiği: %{FOLLOWUP_DROP_PERCENT}\n\n"
+                f"{max_quantity_line(info, cart_max_quantity)}\n\n"
+                f"🔗 {url}",
+                url,
+            )
 
     last_coupon_text = product.get("last_coupon_text", "")
     last_coupon_key = product.get("last_coupon_key") or coupon_state_key(last_coupon_text)
     current_coupon_key = coupon_state_key(info.coupon_text) if info.coupon_exists else ""
     if info.coupon_exists and current_coupon_key and current_coupon_key != last_coupon_key:
         cart_max_quantity = await get_cached_or_probe_cart_quantity(product, url, info)
-        await notify(
-            app,
-            chat_id,
-            f"🎟️ Kupon bulundu: {info.coupon_text}\n\n"
-            f"📦 {info.title}\n\n"
-            f"💰 Ürün fiyatı: {format_money(current_price)} TL\n\n"
-            f"{max_quantity_line(info, cart_max_quantity)}\n\n"
-            f"🔗 {url}",
-            url,
-        )
         product["coupon_notified"] = True
         product["last_coupon_text"] = info.coupon_text
         product["last_coupon_key"] = current_coupon_key
         product["coupon_missing_count"] = 0
+        coupon_signature = f"coupon|{url}|{current_coupon_key}"
+        if await reserve_notification(chat_id, product, "last_coupon_alert_signature", coupon_signature):
+            await notify(
+                app,
+                chat_id,
+                f"🎟️ Kupon bulundu: {info.coupon_text}\n\n"
+                f"📦 {info.title}\n\n"
+                f"💰 Ürün fiyatı: {format_money(current_price)} TL\n\n"
+                f"{max_quantity_line(info, cart_max_quantity)}\n\n"
+                f"🔗 {url}",
+                url,
+            )
 
     if not info.coupon_exists:
         coupon_missing_count = int(product.get("coupon_missing_count", 0) or 0) + 1
@@ -1809,7 +1850,7 @@ app_web = Flask(__name__)
 
 @app_web.route("/")
 def home() -> str:
-    return "Amazon fiyat takip botu çalışıyor"
+    return f"Amazon fiyat takip botu calisiyor - {BOT_VERSION}"
 
 
 def run_web() -> None:
@@ -1836,9 +1877,10 @@ def main() -> None:
     app.add_handler(CommandHandler("productupdate", product_update))
     app.add_handler(CommandHandler("list", list_products))
     app.add_handler(CommandHandler("check", check_command))
+    app.add_handler(CommandHandler("version", version))
     app.add_error_handler(error_handler)
 
-    logger.info("Telegram bot started. PID=%s", os.getpid())
+    logger.info("Telegram bot started. Version=%s PID=%s", BOT_VERSION, os.getpid())
     app.run_polling()
 
 

@@ -23,7 +23,7 @@ from telegram.ext import Application, ApplicationBuilder, CommandHandler, Contex
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-BOT_VERSION = "2026.06.23-1"
+BOT_VERSION = "2026.06.23-2"
 CHECK_INTERVAL = max(
     int(os.getenv("CHECK_INTERVAL", "30")),
     int(os.getenv("CHECK_INTERVAL_MIN", "30")),
@@ -512,66 +512,66 @@ def parse_price(soup: BeautifulSoup, html: str = "") -> Decimal | None:
 
 
 def parse_seller(soup: BeautifulSoup) -> tuple[bool, str]:
-    seller_link = first_text(soup, ["#sellerProfileTriggerId"])
-    if seller_link:
-        return "amazon.com.tr" in normalize_promo_text(seller_link), seller_link
-
-    selectors = [
+    seller_selectors = [
+        "#sellerProfileTriggerId",
         "#merchant-info",
         "#tabular-buybox-container",
         "#tabular-buybox",
         "#offerDisplayFeature_feature_div",
         "#desktop_qualifiedBuyBox",
-        "#buybox",
         "#shipsFromSoldByMessage_feature_div",
+        "#buybox",
     ]
-    seller_text = first_text(soup, selectors)
-    page_text = " ".join(soup.get_text(" ", strip=True).split())
-    compact = seller_text.casefold()
-    page_compact = page_text.casefold()
-    strict_compact = normalize_promo_text(seller_text)
-    seller_patterns = [
-        r"amazon\.com\.tr\s+tarafindan\s+satilir",
-        r"satici\s*/?\s*amazon\.com\.tr\b",
-        r"amazon\.com\.tr\s+saticisindan",
-    ]
-    seller_is_amazon = any(re.search(pattern, strict_compact, re.I) for pattern in seller_patterns)
-    return seller_is_amazon, seller_text or seller_link
+    seller_candidates: list[str] = []
+    for selector in seller_selectors:
+        for element in soup.select(selector):
+            text = " ".join(element.get_text(" ", strip=True).split())
+            if text:
+                seller_candidates.append(text)
 
-    amazon_markers = [
-        "amazon.com.tr tarafından satılır",
-        "amazon.com.tr tarafindan satilir",
-        "satıcı amazon.com.tr",
-        "satici amazon.com.tr",
-        "amazon.com.tr satıcısından",
-        "amazon.com.tr saticisindan",
-        "satıcı amazon.com.tr iadeler",
-        "satici amazon.com.tr iadeler",
-        "gönderici amazon.com.tr",
-        "gonderici amazon.com.tr",
+    page_text = " ".join(soup.get_text(" ", strip=True).split())
+
+    def seller_match(text: str) -> bool:
+        normalized = normalize_promo_text(text)
+        patterns = [
+            r"(?:satici|gonderici)\s*/?\s*amazon(?:\.com\.tr)?\b",
+            r"amazon(?:\.com\.tr)?\s+(?:tarafindan\s+)?satilir",
+            r"amazon(?:\.com\.tr)?\s+saticisindan",
+            r"amazon\.com\.tr.{0,40}(?:satici|gonderici|iade|teslimat)",
+            r"(?:satici|gonderici|iade|teslimat).{0,40}amazon\.com\.tr",
+        ]
+        return any(re.search(pattern, normalized, re.I) for pattern in patterns)
+
+    for candidate in seller_candidates:
+        if seller_match(candidate):
+            return True, "Amazon.com.tr"
+
+    page_blocks = re.split(
+        r"(?i)(?:\bsepete ekle\b|\bsimdi al\b|\bstokta var\b|\bteslimat\b|\biadeler\b)",
+        page_text,
+    )
+    for block in page_blocks:
+        if seller_match(block):
+            return True, "Amazon.com.tr"
+
+    noisy_markers = [
+        "bir sorun oluştu",
+        "bir sorun olustu",
+        "tekrar deneyin",
+        "istek listelerinize",
+        "ürün listene eklenemiyor",
+        "urun listene eklenemiyor",
+        "listeye ekle",
+        "sepete ekle",
     ]
-    amazon_markers += [
-        "amazon.com.tr tarafından satılır",
-        "satıcı amazon.com.tr",
-        "amazon.com.tr satıcısından",
-        "satıcı amazon.com.tr iadeler",
-        "gönderici amazon.com.tr",
-    ]
-    seller_is_amazon = any(marker in compact for marker in amazon_markers)
-    seller_is_amazon = seller_is_amazon or (
-        "amazon.com.tr" in compact
-        and any(word in compact for word in ["satıcı", "satici", "gönderici", "gonderici"])
-    )
-    seller_is_amazon = seller_is_amazon or (
-        "amazon.com.tr" in compact
-        and any(word in compact for word in ["satıcı", "gönderici"])
-    )
-    seller_is_amazon = seller_is_amazon or (
-        "amazon.com.tr" in page_compact
-        and any(word in page_compact for word in ["satıcı", "satÄ±cÄ±", "satici", "gönderici", "gÃ¶nderici", "gonderici"])
-        and any(word in page_compact for word in ["sepete ekle", "şimdi al", "stokta var", "teslimat"])
-    )
-    return seller_is_amazon, seller_text or seller_link
+    for candidate in seller_candidates:
+        normalized = normalize_promo_text(candidate)
+        if any(marker in normalized for marker in noisy_markers):
+            continue
+        if normalized:
+            return False, candidate
+
+    return False, ""
 
 
 def parse_stock(soup: BeautifulSoup) -> bool:

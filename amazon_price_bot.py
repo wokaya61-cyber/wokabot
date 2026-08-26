@@ -23,7 +23,7 @@ from telegram.ext import Application, ApplicationBuilder, CommandHandler, Contex
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-BOT_VERSION = "2026.06.23-3"
+BOT_VERSION = "2026.06.23-5"
 CHECK_INTERVAL = max(
     int(os.getenv("CHECK_INTERVAL", "30")),
     int(os.getenv("CHECK_INTERVAL_MIN", "30")),
@@ -452,16 +452,10 @@ def parse_price(soup: BeautifulSoup, html: str = "") -> Decimal | None:
         "#corePriceDisplay_mobile_feature_div .priceToPay",
         "#corePrice_feature_div .priceToPay",
         "#apex_desktop .priceToPay",
-        "#tp_price_block_total_price_ww",
-        "#newBuyBoxPrice",
-        "#price_inside_buybox",
         "#corePriceDisplay_desktop_feature_div",
         "#corePriceDisplay_mobile_feature_div",
         "#corePrice_feature_div",
         "#corePrice_desktop",
-        "#rightCol",
-        "#centerCol",
-        "#ppd",
     ]
 
     for selector in price_containers:
@@ -479,12 +473,8 @@ def parse_price(soup: BeautifulSoup, html: str = "") -> Decimal | None:
         "#corePriceDisplay_desktop_feature_div span[data-a-color='price'] .a-offscreen",
         "#corePriceDisplay_mobile_feature_div span[data-a-color='price'] .a-offscreen",
         "#corePrice_desktop .a-price .a-offscreen",
-        "#rightCol .a-price .a-offscreen",
         "#centerCol .priceToPay .a-offscreen",
         "#ppd .priceToPay .a-offscreen",
-        "#priceblock_dealprice",
-        "#priceblock_ourprice",
-        "#price_inside_buybox",
     ]
 
     for selector in selectors:
@@ -492,21 +482,6 @@ def parse_price(soup: BeautifulSoup, html: str = "") -> Decimal | None:
             price = money_to_decimal(element.get_text(" ", strip=True))
             if price and price > 0:
                 return price
-
-    for selector in [
-        "meta[property='product:price:amount']",
-        "meta[itemprop='price']",
-        "[itemprop='price']",
-    ]:
-        for element in soup.select(selector):
-            raw_price = element.get("content") or element.get_text(" ", strip=True)
-            price = money_to_decimal(str(raw_price))
-            if price and price > 0:
-                return price
-
-    script_price = parse_price_from_scripts(soup, html)
-    if script_price:
-        return script_price
 
     return None
 
@@ -1671,9 +1646,15 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
         alert_title = "🔥 Fiyat düştü" if not returned_to_last_alert else "🔥 Fiyat tekrar alarm seviyesine düştü"
         alert_kind = "return" if returned_to_last_alert else "drop"
         alert_generation = int(product.get("price_rebound_generation", 0) or 0)
+        display_old_price = rebound_reference_price if returned_to_last_alert and rebound_reference_price else old_price
+        display_drop = calculate_drop(display_old_price, current_price)
+        if current_price >= display_old_price or display_drop <= 0:
+            product["last_price"] = str(current_price)
+            product["last_error"] = ""
+            return
         alert_signature = (
             f"{alert_kind}|{url}|{alert_generation}|"
-            f"{old_price:.2f}|{current_price:.2f}"
+            f"{display_old_price:.2f}|{current_price:.2f}"
         )
         product["base_price"] = str(current_price)
         product["first_drop_notified"] = True
@@ -1688,8 +1669,8 @@ async def check_product(app: Application, chat_id: str, product: dict[str, Any])
                 f"📦 {info.title}\n\n"
                 f"{seller_line(info)}\n\n"
                 f"💰 Yeni fiyat: {format_money(current_price)} TL\n"
-                f"💸 Eski fiyat: {format_money(old_price)} TL\n"
-                f"📉 Düşüş: %{drop:.2f}\n\n"
+                f"💸 Eski fiyat: {format_money(display_old_price)} TL\n"
+                f"📉 Düşüş: %{display_drop:.2f}\n\n"
                 f"🎯 Sonraki fiyat düşüş eşiği: %{FOLLOWUP_DROP_PERCENT}\n\n"
                 f"{max_quantity_line(info, cart_max_quantity)}\n\n"
                 f"🔗 {url}",
